@@ -27,7 +27,7 @@ jobs:
     env:
       MEMSHARE_TEST_DATABASE_URL: postgresql://memshare:test-password@127.0.0.1:5432/memshare_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: clippy,rustfmt
