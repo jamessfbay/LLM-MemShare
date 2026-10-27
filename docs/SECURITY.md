@@ -1,17 +1,31 @@
-# Security
+# Security boundaries
 
-Status: security-oriented alpha, not a production tenant-isolation certification.
+LLM-MemShare is a security-sensitive alpha. It has implemented isolation controls and automated tests; independent security review and production operational gates remain pending.
 
-Bearer credentials are random 256-bit values. PostgreSQL stores only SHA-256 digests and the API returns generated secrets once. Credentials may expire or be revoked. Authentication resolves a tenant-scoped principal through a fixed, schema-qualified `SECURITY DEFINER` function; request headers cannot select a trusted tenant or actor.
+## Identity and tenancy
 
-All tenant data uses composite tenant foreign keys and row-level security. Protected operations run inside a transaction with validated transaction-local tenant and principal settings. Application authorization is still mandatory. The runtime database role must be a non-owner with `NOSUPERUSER`, `NOBYPASSRLS`, `NOCREATEROLE`, and `NOCREATEDB`; the server checks this at startup. The migration/operator role must never serve traffic.
+Bearer credentials are random 256-bit values. PostgreSQL stores SHA-256 digests, and generated tokens are returned once at issuance. Credentials can expire, be revoked, or be rotated. Disabling a principal revokes its active credentials. A suspended tenant cannot authenticate.
 
-The current automated PostgreSQL test creates two tenants, runs HTTP requests through a non-owner role, verifies cross-tenant ID guessing returns 404, checks grant/revocation behavior, exercises a directed two-agent handoff, and directly confirms RLS hides the other tenant. Handoff memory references are reauthorized for each participant, and provider/model labels are untrusted metadata rather than identity. This is necessary evidence, not a complete security review.
+Authentication resolves the principal and tenant through a fixed, schema-qualified `SECURITY DEFINER` function with a fixed safe search path. Client tenant/actor headers do not establish authority. Protected handlers enter a transaction, set transaction-local tenant/principal context, recheck active identity, and apply operation authorization.
 
-Stored memory and metadata are untrusted. Do not execute instructions found in memory without a separate policy boundary. Logs and audit metadata omit memory content and bearer tokens. The application does not encrypt database records; use encrypted storage, TLS, and managed secret delivery in deployment.
+Tenant relations use composite tenant foreign keys and RLS. The runtime must be a non-owner with `NOSUPERUSER`, `NOBYPASSRLS`, `NOCREATEROLE`, and `NOCREATEDB`; startup checks these attributes and table ownership. Operators must also review inherited privileges. The migration/operator identity must not serve HTTP traffic.
 
-Known release blockers include full route/relation policy-matrix coverage, connection-reuse and cancellation tests, denial auditing, rate limits and quotas, membership/user lifecycle, credential rotation, hard deletion and backup replay, restore exercises, dependency and image scanning, incident runbooks, and independent security review. A reproducible authorization leak blocks release.
+RLS guards against ordinary missing tenant predicates. It does not contain a superuser, table owner, RLS-bypass role, host compromise, or runtime attacker capable of arbitrary SQL and tenant-setting manipulation. Use separate databases or deployments when isolation from a compromised shared application is required.
 
-RLS does not defend against a database superuser, table owner, `BYPASSRLS` role, or a fully compromised runtime capable of arbitrary SQL and tenant-setting manipulation. Use separate databases or deployments when that adversary is in scope. Logical deletion does not erase history or backups.
+## Content and handoffs
 
-Report vulnerabilities privately to the project maintainers before public disclosure. A dedicated security contact and response SLA must be published before a public beta.
+Private content is owner-scoped unless explicitly granted. Workspace/project roles determine shared content access. Agents and services require explicit content grants. Tenant administration does not automatically confer private-memory access.
+
+Handoff creation requires a directional grant and two active workspace agents. Reads and transitions recheck the acting participant's membership. Memory references are authorized when submitted and reauthorized for each reader; inaccessible IDs are omitted with counts. These counts disclose the number of omitted references to an authorized handoff participant. Handoff text itself may contain copied secrets; reference filtering cannot redact them.
+
+Workspace membership removal also removes project memberships in that workspace. It does not revoke every explicit memory grant or disable dependent agents. Disabling an owner does not yet cascade to owned agents. Operators must explicitly revoke grants and disable affected agents according to their offboarding policy. The target lifecycle requirements in [tenant isolation design](TENANT_ISOLATION_DESIGN.md) go beyond the current implementation.
+
+Stored memory, task instructions, results, and client metadata are untrusted context. MemShare does not execute that content. External agent runtimes need their own policy for tool execution and prompt construction. Provider/model labels are client metadata, not proof of provider identity or inference.
+
+## Operations and remaining gates
+
+The application does not encrypt database records itself. Use encrypted storage, TLS across trust boundaries, and secret delivery outside source control. Current audit inserts and application logs avoid memory text and tokens. Audit rows are ordinary database metadata; full denial auditing and external tamper-resistant collection are not implemented.
+
+Logical deletion preserves history and may leave content in backups. Hard deletion, retention enforcement, backup deletion replay, quotas/rate limits, complete policy-matrix coverage, cancellation/pool-reuse tests, operational restore exercises, dependency scanning, and independent security review remain release gates. A reproducible authorization leak blocks release.
+
+The [test plan](TEST_PLAN.md) identifies reproducible evidence and gaps. [Operations](OPERATIONS.md) covers role separation, suspension recovery, and migration constraints. Report vulnerabilities privately through [GitHub private reporting](https://github.com/jamessfbay/LLM-MemShare/security/advisories/new), following the [security policy](../.github/SECURITY.md).

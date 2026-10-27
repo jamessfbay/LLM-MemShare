@@ -2,11 +2,11 @@
 
 Status: implemented alpha contract. The service uses JSON over HTTP and bearer credentials. A credential resolves the tenant and principal; client-supplied tenant or actor headers never establish authority. Unknown JSON fields are rejected.
 
-The API publishes a versioned OpenAPI 3.1 document at `GET /v1/openapi.json`. A stable external SDK is not yet published. Only the routes in the implemented table below are available.
+The API publishes an OpenAPI 3.1 route inventory at `GET /v1/openapi.json`. Request/response schemas in that document are not yet exhaustive; this page and the handoff tool schema provide input details. A stable external SDK is not yet published. Only the routes in the implemented table below are available.
 
 ## Authentication and errors
 
-Send `Authorization: Bearer <token>`. Tokens are returned only when bootstrapping a tenant, provisioning a tenant, or creating an agent. Store them as secrets. Invalid, expired, revoked, disabled, or cross-tenant credentials fail without exposing protected resource existence.
+Send `Authorization: Bearer <token>`. Tokens are issued during tenant bootstrap/provisioning, principal or agent creation, and credential rotation. Bootstrap uses the operator-supplied token; other issuance paths return a generated token once. Store them as secrets. Invalid, expired, revoked, disabled, or suspended-tenant identities fail authentication. A valid identity from another tenant cannot access the target resource.
 
 Errors use a JSON object with a stable machine-readable code and message. Validation errors return 400, authentication failures 401, authorization failures 403, hidden/inaccessible resources 404, and idempotency or version conflicts 409. Raw database errors are never returned.
 
@@ -21,7 +21,7 @@ Errors use a JSON object with a stable machine-readable code and message. Valida
 | `POST /v1/principals` | Tenant administrator user | Creates an additional user or service, optionally creates a user as tenant administrator, and returns its credential once. |
 | `PATCH /v1/principals/{principal_id}` | Tenant administrator user | Changes status and/or tenant role; self-disable and self-demotion are rejected. Disabling permanently revokes active credentials. |
 | `POST /v1/principals/{principal_id}/credentials` | Principal or tenant administrator | Revokes active credentials and returns one replacement credential. |
-| `PATCH /v1/tenant` | Tenant administrator user | Activates or suspends the current tenant. |
+| `PATCH /v1/tenant` | Tenant administrator user | Sets current tenant status; suspension blocks further HTTP authentication. Operator recovery is required to reactivate a suspended tenant. |
 | `POST /v1/workspaces` | Tenant administrator user | Creates a workspace and an administrator membership for the actor. |
 | `PUT /v1/workspaces/{workspace_id}/members/{principal_id}` | Workspace administrator | Adds, restores, or changes a workspace membership. |
 | `DELETE /v1/workspaces/{workspace_id}/members/{principal_id}` | Workspace administrator | Removes a membership; administrator self-removal is rejected. |
@@ -144,6 +144,12 @@ Claim with `{"version":1,"lease_seconds":300}`. A successful claim increments th
 ```
 
 Task and result envelopes require a protocol version and summary. Tasks optionally carry instructions; results require an outcome of `succeeded` or `failed`; application-specific values live under `data`. Each envelope is limited to 64 KiB and each reference list to 100 unique memory IDs. The server records authenticated actor provenance beside client-supplied provider metadata. Provider, model, and framework strings are informational and never establish identity or authority.
+
+The supported task/result `protocol_version` is exactly `1.0`. Summaries contain 1–2,000 bytes, task instructions are at most 20,000 bytes, and `data` is a JSON object. Claim defaults to a 300-second lease and accepts 30–3,600 seconds. Lease expiry permits a new claim with the current version; it does not change the stored status automatically. Release and cancellation accept `{"version":CURRENT_VERSION}`. Completion requires an active lease. All successful transitions increment the version.
+
+List defaults to `direction=inbox` and `limit=50` (range 1–100). Directions are `inbox`, `outbox`, and `all`; optional status is `queued`, `claimed`, `completed`, or `cancelled`. The response is `{"items":[...],"next_cursor":null}` or a continuation cursor. Pass `next_cursor` unchanged using URL encoding and keep the same filters. Ordering is descending `(created_at,id)`; every page rechecks authority. Memory listing currently has `q` and `limit`, with no continuation cursor.
+
+See [the integration walkthrough](INTEGRATIONS.md) for a complete runnable exchange and [operations](OPERATIONS.md) for suspension and credential recovery.
 
 The OpenAI mapping accepts `{"type":"function_call","name":"memshare_create_handoff","arguments":"<JSON string>","call_id":"..."}`. The Anthropic mapping accepts `{"type":"tool_use","name":"memshare_complete_handoff","input":{...},"id":"..."}`. Replace the tool name with `memshare_claim_handoff` or `memshare_complete_handoff` for the corresponding route. These are narrow input mappings, not hosted model clients or general compatibility claims.
 

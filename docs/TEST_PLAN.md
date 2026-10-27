@@ -1,52 +1,70 @@
-# Test plan
+# Testing and verification
 
-## Required commands
+The current suite uses Rust unit tests and one PostgreSQL HTTP integration journey. CI runs the same suite with PostgreSQL 16, then builds the release binary and verifies the source package. See [GitHub Actions](https://github.com/jamessfbay/LLM-MemShare/actions/workflows/ci.yml) for results tied to individual commits.
+
+## Local commands
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
-MEMSHARE_TEST_DATABASE_URL='postgresql://owner:password@127.0.0.1:55432/memshare' \
+cargo test --lib
+
+MEMSHARE_TEST_DATABASE_URL='postgresql://TEST_ADMIN:TEST_PASSWORD@127.0.0.1:5432/postgres' \
   cargo test --all-targets --all-features
+
 cargo build --release --locked
-cargo package --locked --allow-dirty
+cargo package --locked
 ```
 
-The PostgreSQL URL must point to an isolated test server whose role can create and drop databases and roles. The integration test creates a uniquely named database, applies embedded migrations, creates a unique `NOLOGIN NOBYPASSRLS` runtime role, runs the HTTP journey through that role, closes pools, and drops the database. Never point it at production. CI provides PostgreSQL 16 and fails if the required integration test cannot run.
+Use `cargo package --locked --allow-dirty` only when intentionally verifying uncommitted source. Packaging builds an extracted copy, checking that embedded contracts and migrations are included.
 
-## Current automated evidence
+The integration-test URL must point to a dedicated local/test server whose role can create/drop databases and roles. The test creates a uniquely named database, applies embedded migrations, creates a `NOLOGIN NOBYPASSRLS` runtime role, runs requests through that role, closes pools, and drops the database on successful completion. PostgreSQL roles are cluster-wide and the current test leaves its generated runtime role behind; failed tests can also leave their database behind. Use a disposable test server or inspect those named test objects before operator cleanup. Never use production for this test.
 
-- Unit tests cover random URL-safe credential generation, bootstrap identifier validation, and the grant action allowlist.
-- The database integration test verifies a safe runtime role is accepted and an owner role is rejected.
-- Two tenants are created in one database. Tenant B cannot read Tenant A's memory by guessing its UUID.
-- An agent cannot read private memory before a grant, can read after an explicit grant, and loses access after revocation.
-- A workspace member can read a shared record but cannot update or delete another principal's record without an administrative role or explicit grant.
-- Idempotent replay returns the original authorized result, key/input collisions return 409, stale versions return 409, and malformed JSON/path/query input uses stable JSON error codes.
-- A direct SQL query under Tenant B's transaction context cannot see Tenant A's row, proving the test exercises RLS rather than only HTTP predicates.
-- HTTP handlers run against the real Axum router, authentication function, transactions, constraints, and PostgreSQL policies.
-- Tenant administration tests create a service, workspace, workspace membership, project, project membership, and rotated credential; the replaced credential immediately stops authenticating.
-- Handoff tests cover target inbox discovery, source/target separation, claim leases, release and re-claim across provider mappings, typed results, and denial after workspace-membership removal.
-- The deployment-level test starts three independent API instances against one PostgreSQL database. It proves cross-instance idempotent replay, collision rejection, exactly one winner for two same-version concurrent writes, grant visibility, immediate post-commit revocation visibility, and cross-tenant ID-guess denial.
-- The same deployment test creates two agent identities, grants directional handoff authority, creates through an OpenAI-style function call on instance 1, claims through instance 2, completes through an Anthropic-style tool use on instance 3, and lets the source read the result from instance 1. It also proves unauthorized memory references are omitted and another tenant cannot read the handoff.
+There are currently **7 unit tests and 1 integration test**, with many assertions inside the integration journey. Required database tests fail when their URL is missing; they do not silently skip. Local Cargo validation needs no Docker. The CI PostgreSQL service uses a container on the hosted runner; the Rust application is built and tested directly.
 
-## Multi-instance verification
+## Implemented evidence
 
-`scripts/verify-multi-instance.sh` is an isolated black-box system test using `deploy/compose.multi-instance.yaml`. It builds the production image, applies migrations once, waits for all three readiness endpoints, provisions two tenants, sends related operations through different instances, records a machine-readable report, and tears the stack down. It does not require or reuse a developer database.
+| Area | Evidence in source |
+| --- | --- |
+| Input contracts | Token randomness, bootstrap name bounds, grant action allowlist, tool input parsing, contract JSON, handoff cursor round trip and malformed cursor rejection. |
+| Runtime role | Non-owner role accepted; database owner rejected. |
+| Tenant isolation | Tenant B cannot read A's memory or handoff; direct SQL under B's runtime context cannot see A's memory. |
+| Memory grants | Agent denied before grant, allowed after read grant, denied after revocation. |
+| Shared memory roles | Workspace member reads but cannot mutate another user's record without authority. |
+| Writes and retries | Idempotent replay, different-input collision, stale version, updates, logical deletion. |
+| Request errors | Malformed JSON, UUID path, and query values use JSON errors. |
+| Administration | Additional administrator and service creation, workspace/project memberships, credential rotation, principal disablement, and project-membership removal when workspace membership is removed. |
+| Handoffs | Self-handoff rejection, directional grant, target inbox, claim, stale-version conflict, release/reclaim, typed result, cancellation, participant and tenant denial, removed-member denial, memory-reference omission. |
+| Provider envelopes | OpenAI-style create/claim and Anthropic-style create/complete within the real PostgreSQL journey; parser unit fixtures. |
 
-This deployment test is optional during direct Cargo development and is not required by the no-container local workflow above. CI compiles the release artifact and runs all PostgreSQL integration tests without starting application containers.
+Sources: [integration journey](../tests/multi_tenant.rs), [adapter tests](../src/adapters.rs), [API validation/cursor tests](../src/api.rs), and [database helpers](../src/db.rs).
 
-The original infrastructure run and the expanded cross-agent run on 2026-10-26 passed. See the [multi-instance QA report](../.gstack/qa-reports/qa-report-multi-instance-2026-10-26.md) and [cross-agent/cross-LLM report](../.gstack/qa-reports/qa-report-cross-agent-llm-2026-10-26.md). This evidence covers database-mediated consistency between API instances and deterministic provider-envelope mappings; it does not cover live model quality, provider availability, load capacity, network partitions, PostgreSQL failover, or connection cancellation.
+Lease acquisition and release/reclaim are covered. This should not be read as evidence for every expired-lease recovery race or every provider/operation combination.
 
-## Alpha completion matrix
+The documentation walkthrough was executed on 2026-10-27 against local PostgreSQL using a temporary fresh database and separate owner/runtime roles. Database creation, migrations, grants, bootstrap, readiness, memory create/list, and the OpenAI-style create to Anthropic-style complete example passed. The temporary database and roles were removed afterward. This validates the documented HTTP sequence without live provider calls or Docker.
+
+## Optional multi-instance system test
+
+```sh
+./scripts/verify-multi-instance.sh
+```
+
+This script requires Docker Compose and uses [compose.multi-instance.yaml](../deploy/compose.multi-instance.yaml). It builds the runtime image, applies migrations, starts three API processes against one isolated PostgreSQL database, waits for readiness, and provisions two tenants. It tests cross-instance idempotency, a same-version concurrent update with one winner, grant/revocation visibility, tenant denial, and a two-agent exchange using different provider envelopes.
+
+Default listeners are `127.0.0.1:28081`, `:28082`, and `:28083`; override with `MEMSHARE_INSTANCE_1_PORT`, `MEMSHARE_INSTANCE_2_PORT`, and `MEMSHARE_INSTANCE_3_PORT`. It generates test credentials and a local JSON report under `.gstack/qa-reports/`. That directory is ignored and is not part of the published documentation. Unless `MEMSHARE_KEEP_MULTI_INSTANCE_STACK=1` is set, the script tears down its stack and temporary data.
+
+Historical local multi-instance runs are separate from the per-commit CI suite. Re-run the script when fresh deployment evidence is needed; do not treat old reports as proof for changed code. The current documentation update was verified without running Docker.
+
+## Remaining verification gates
 
 | Area | Required additions |
 | --- | --- |
-| Authentication | Malformed, too-short, expired, revoked, disabled-principal, suspended-tenant, and credential-last-use behavior. |
-| Tenant isolation | Every route and DML operation, missing/wrong context, `WITH CHECK`, list/search limits, pool reuse after commit/rollback/error/cancellation. |
-| Authorization | Every scope/action/actor matrix cell, multi-workspace subjects, removed membership, issuer authority, and grant expiration. |
-| Concurrency | Same-version writers are covered across instances. Add revocation before/after authorization barriers, concurrent idempotent creation, cancellation, and deterministic deadlock handling. |
-| Lifecycle | Ownership transfer, last-administrator transitions, agent-owner disablement cascades, and administrative hard deletion. |
-| Deployment | Clean Compose install, bootstrap, restart, migration upgrade, rollback boundary, backup/restore, and startup role rejection. |
-| Contracts | Unknown fields, size limits, status/error codes, stable pagination, generated OpenAPI, and client compatibility fixtures. |
-| Future features | Proposal/review locking, hard deletion and backup replay, index staleness, and broader protocol conformance. |
+| Authentication | Full malformed/expiry/suspension matrix and credential last-use semantics. |
+| Tenant isolation | Every relation/action, missing or wrong context, RLS `WITH CHECK`, pool reuse after commit/rollback/error/cancellation. |
+| Authorization | Complete scope/action/actor matrix, multi-workspace subjects, grant expiry, owner lifecycle and inherited privileges. |
+| Concurrency | Deterministic barriers for revocation, duplicate creation, expired lease recovery, cancellation, claim/complete races, deadlocks. |
+| Lifecycle | Ownership transfer, last-administrator transitions, owner-agent cascades, tenant restoration, hard deletion. |
+| Operations | Existing-data migration/backfill, upgrade failure, backup/restore and deletion replay, load/soak, database failover. |
+| Contracts | Complete OpenAPI input/output schemas, wider size/error/pagination checks, every provider mapping, SDK/protocol conformance. |
 
-A reproducible cross-tenant access path is release-blocking. Test reports must distinguish passed, failed, and skipped tests; required security tests cannot be silently skipped.
+No live LLM is called in this suite. It verifies protocol and storage behavior, not model quality, provider availability, or private reasoning transfer. A reproducible cross-tenant leak blocks release. Report passed, failed, and skipped checks separately.

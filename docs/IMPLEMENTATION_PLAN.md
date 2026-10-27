@@ -150,16 +150,8 @@ Record cold start, time to first call, p50/p95 latency and error rate with data 
 
 Use SemVer with explicit 0.x migration notes. Release notes include breaking changes, migrations, limitations and rollback constraints. Label experimental APIs. Security claims must follow evidence and deployment conditions.
 
-## GSTACK REVIEW REPORT
+## Current release decision
 
-| Review | Trigger | Why | Runs | Status | Findings |
-| --- | --- | --- | --- | --- | --- |
-| CEO Review | `/plan-ceo-review` | Scope and strategy | 0 | Not run | Backend migration keeps the approved product direction. |
-| Codex Review | `/codex review` | Independent second opinion | 0 | Not run | No outside model review requested. |
-| Eng Review | `/plan-eng-review` | Architecture and tests | 1 | Issues open | 18 total findings; 2 critical evidence gaps remain. |
-| Design Review | `/plan-design-review` | UI/UX gaps | 0 | Not applicable | No UI is in the alpha scope. |
-| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | Not run | CLI and Compose flow require later live audit. |
+The project is published as an alpha. Its [architecture](ARCHITECTURE.md), [local setup](GETTING_STARTED.md), [integration walkthrough](INTEGRATIONS.md), and [operations guide](OPERATIONS.md) describe the implemented service. The [test plan](TEST_PLAN.md) maps current evidence to remaining gaps.
 
-**UNRESOLVED:** connection-reuse/cancellation evidence and concurrency orderings beyond the verified same-version cross-instance update race. Initial runtime privilege auditing is implemented; broader catalog coverage remains ordinary hardening work.
-
-**VERDICT:** implementation may proceed as an alpha; production tenant-isolation claims remain blocked by the release gates.
+Connection-pool reuse/cancellation tests, broader concurrency orderings, complete privilege/policy-matrix checks, and operational recovery evidence remain open. Production tenant-isolation claims require the release gates and independent security review described above.

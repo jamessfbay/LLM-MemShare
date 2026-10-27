@@ -4,7 +4,11 @@ LLM-MemShare is an early security-sensitive Rust project. Start with a focused i
 
 ## Development
 
-Install Rust 1.89.0 and PostgreSQL 16. Format, lint, and test every change:
+Install Rust 1.89.0 and PostgreSQL 16.
+
+Follow [local setup](docs/GETTING_STARTED.md) for database roles and [the documentation index](docs/README.md) for API, architecture, and operations references. Documentation is maintained in English. Keep text architecture diagrams aligned with the implemented runtime and label future requirements explicitly.
+
+Format, lint, and test every change:
 
 ```sh
 cargo fmt --all -- --check

@@ -1,62 +1,138 @@
 # LLM-MemShare
 
-LLM-MemShare is a Rust service for permissioned memory and task handoffs across agents and model providers. PostgreSQL stores records and enforces tenant isolation in depth; clients authenticate with credentials issued to tenant-scoped users, services, or agents.
+[![CI](https://github.com/jamessfbay/LLM-MemShare/actions/workflows/ci.yml/badge.svg)](https://github.com/jamessfbay/LLM-MemShare/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
-**Status:** Rust-only multi-tenant alpha. The core tenant, principal, workspace, project, credential, grant, memory, and agent-handoff lifecycle is implemented and tested against PostgreSQL. The project has not completed the independent review and operational gates required for a production tenant-isolation claim.
+Permissioned memory and task handoffs for agents, across model providers.
 
-## Run locally
+LLM-MemShare is open-source middleware written in Rust. Applications use one HTTP service to store shared context, control access, and pass versioned tasks between agents. A deployment can host multiple tenants; bearer credentials identify each tenant and principal, while PostgreSQL stores authorization and task state.
 
-Requires Rust 1.89+ and PostgreSQL 16+. For local development, use an isolated PostgreSQL database and separate owner and runtime roles. The owner applies migrations and provisions tenants; the runtime role must be `NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB` and must not own tables.
+**Status: 0.1.0 alpha.** The implemented API includes tenant administration, credentials, grants, memory CRUD, and leased agent handoffs. Production security review, recovery exercises, and remaining release gates are tracked in the [roadmap](docs/ROADMAP.md).
 
-```sh
-cargo run -- migrate
-MEMSHARE_BOOTSTRAP_TOKEN="$(openssl rand -base64 32)" \
-  cargo run -- bootstrap --tenant acme --workspace main --user alice
-cargo run -- serve
+## Architecture at a glance
+
+```text
+Application / agent orchestrators
+  |
+  +-- Agent A: model/provider A -- function_call --+
+  +-- Agent B: model/provider B -- tool_use -------+-- Authenticated HTTP
+  +-- Any HTTP client ----------- native JSON ----+          |
+                                                           v
+  +------------------------------------------------------------+
+  | LLM-MemShare: stateless Rust API processes                   |
+  |                                                            |
+  | Native routes / provider envelope mappings                  |
+  |                         |                                  |
+  | Credential lookup -> tenant + principal -> authorization   |
+  |                         |                                  |
+  | Administration | memories + grants | leased handoffs       |
+  |                         |                                  |
+  | SQLx transactions, versions, idempotency, audit metadata    |
+  +-------------------------+----------------------------------+
+                            |
+                            v
+  +------------------------------------------------------------+
+  | PostgreSQL: source of truth                                |
+  | Tenants / principals / memberships / credentials / grants  |
+  | Memories / history / handoffs / idempotency / audit events |
+  | Composite tenant constraints + row-level security          |
+  +------------------------------------------------------------+
 ```
 
-Set `MEMSHARE_DATABASE_URL` to the owner URL for `migrate`, `bootstrap`, and `provision-tenant`, then switch it to the runtime URL before `serve`. The server refuses to start under an unsafe owner or privileged role. `.env.example` documents all settings. Compose files remain available as optional deployment examples but are not required for development.
+External orchestrators run model calls and tool loops. MemShare stores the authorized context and task state they exchange. See the [detailed architecture](docs/ARCHITECTURE.md) for tenant relationships, request processing, state transitions, and horizontal deployment.
 
-Provision the first tenant with the owner connection. Use a random value of at least 32 bytes for the bootstrap token and retain it as the first user credential:
+## What works today
 
-```sh
-export MEMSHARE_BOOTSTRAP_TOKEN="$(openssl rand -base64 32)"
-cargo run -- bootstrap --tenant acme --workspace main --user alice
-```
+| Capability | Implemented behavior |
+| --- | --- |
+| Multiple tenants | Operator provisioning, tenant-scoped identities, database row-level security. |
+| Administration | Users, services, agents, tenant roles, workspaces, projects, memberships, principal disablement, tenant suspension. |
+| Credentials | Random bearer tokens, digest storage, expiration, revocation, rotation. |
+| Permissioned memory | Private/workspace/project/agent scopes, explicit grants, CRUD, keyword filtering, history, logical deletion. |
+| Safe retries | Idempotency keys for creation; versions and row locks for mutations. |
+| Agent handoffs | Inbox/outbox with cursors, create, claim, lease recovery, release, complete, cancel. |
+| Cross-LLM exchange | Native JSON plus OpenAI-style and Anthropic-style envelopes for create, claim, and complete. |
+| Operations | Embedded migrations, runtime-role checks, readiness, structured logs, CI and source-package verification. |
 
-For direct Cargo development, run `migrate`, `bootstrap`, and `provision-tenant` with an operator/owner URL, then run `serve` with a separately provisioned non-owner runtime URL. Never run migrations against an unreviewed application database.
+## Start locally
 
-Bootstrap is permitted only when there are no credentials. `provision-tenant` creates later tenants and generates their first credential. Keep tokens secret. `POST /v1/agents` returns a new agent token once; create a grant before that agent accesses a scope. The HTTP contract is documented in [`docs/API.md`](docs/API.md).
-
-```sh
-curl -X POST http://127.0.0.1:8080/v1/memories \
-  -H "Authorization: Bearer $MEMSHARE_BOOTSTRAP_TOKEN" \
-  -H 'Content-Type: application/json' -H 'Idempotency-Key: preference-1' \
-  -d "{\"workspace_id\":\"$MEMSHARE_WORKSPACE_ID\",\"project_id\":null,\"scope\":\"private\",\"scope_id\":\"$MEMSHARE_PRINCIPAL_ID\",\"kind\":\"preference\",\"content\":\"Prefers short reports\",\"source\":{},\"expires_at\":null}"
-```
-
-Use the `workspace_id` and `principal_id` printed by bootstrap as `MEMSHARE_WORKSPACE_ID` and `MEMSHARE_PRINCIPAL_ID` in the example above.
-
-## Cross-agent handoffs
-
-The Rust runtime supports directed, versioned handoffs between two agents in the same tenant workspace. The target agent's owner grants the source agent the `handoff` action on the target agent scope. The source can create and cancel a task. The target discovers tasks through its inbox, claims them with a bounded lease, releases them for retry, or completes them. Expired leases can be reclaimed. Both participants must retain active workspace membership. Memory references are always reauthorized for the reader and inaccessible references are omitted with a count.
-
-The provider-neutral contract is available from `GET /v1/tool-contracts/handoff` and in [`contracts/handoff-tools-v1.json`](contracts/handoff-tools-v1.json). OpenAI-style function calls and Anthropic-style tool-use blocks are supported symmetrically for create, claim, and complete. The service performs no model inference and never trusts provider or model names for authorization. The complete HTTP surface is published at `GET /v1/openapi.json`. See [integrations](docs/INTEGRATIONS.md) for the boundary.
-
-Run tests against an **isolated test database**:
+Requires Rust **1.89+** and PostgreSQL **16+**. The normal development path uses Cargo and a local PostgreSQL service. Follow the [complete setup guide](docs/GETTING_STARTED.md) to create the owner/runtime roles and database first.
 
 ```sh
-MEMSHARE_TEST_DATABASE_URL='postgresql://memshare:password@localhost:5432/memshare_test' cargo test
+git clone https://github.com/jamessfbay/LLM-MemShare.git
+cd LLM-MemShare
+cargo build --locked
+
+# Set these to the connections created in the setup guide.
+export MEMSHARE_OWNER_DATABASE_URL='postgresql://memshare_owner:OWNER_PASSWORD@127.0.0.1:5432/memshare'
+export MEMSHARE_RUNTIME_DATABASE_URL='postgresql://memshare_runtime:RUNTIME_PASSWORD@127.0.0.1:5432/memshare'
+
+MEMSHARE_DATABASE_URL="$MEMSHARE_OWNER_DATABASE_URL" cargo run --locked -- migrate
+
+# Retain this secret: it becomes the first user's bearer credential.
+export MEMSHARE_BOOTSTRAP_TOKEN="$(openssl rand -hex 32)"
+MEMSHARE_DATABASE_URL="$MEMSHARE_OWNER_DATABASE_URL" \
+  cargo run --locked -- bootstrap --tenant acme --workspace main --user alice
+
+# Apply the runtime grants from the setup guide before serving.
+MEMSHARE_DATABASE_URL="$MEMSHARE_RUNTIME_DATABASE_URL" cargo run --locked -- serve
 ```
 
-Unit tests run without a database. Database integration tests require an isolated database and must not be skipped in CI. See [architecture](docs/ARCHITECTURE.md), [API](docs/API.md), [security](docs/SECURITY.md), the [implementation plan](docs/IMPLEMENTATION_PLAN.md), the [Rust feasibility review](docs/RUST_FEASIBILITY_REVIEW.md), the proposed [tenant isolation design](docs/TENANT_ISOLATION_DESIGN.md), and [contributing](CONTRIBUTING.md).
-
-## Verify horizontal behavior
-
-The multi-instance verification starts three API processes against one isolated PostgreSQL database and proves cross-instance idempotency, optimistic-write serialization, grant and revocation propagation, tenant isolation, and a two-agent handoff using two model tool-call formats:
+Bootstrap prints `workspace_id` and `principal_id`. In another terminal, set those IDs and the retained bootstrap credential, then store a memory:
 
 ```sh
-./scripts/verify-multi-instance.sh
+export MEMSHARE_TOKEN='<retained bootstrap token>'
+export MEMSHARE_WORKSPACE_ID='<workspace_id>'
+export MEMSHARE_PRINCIPAL_ID='<principal_id>'
+
+curl --fail-with-body http://127.0.0.1:8080/v1/memories \
+  -H "Authorization: Bearer $MEMSHARE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: first-preference' \
+  -d "{\"workspace_id\":\"$MEMSHARE_WORKSPACE_ID\",\"scope\":\"private\",\"scope_id\":\"$MEMSHARE_PRINCIPAL_ID\",\"kind\":\"preference\",\"content\":\"Prefers short reports\",\"source\":{}}"
 ```
 
-The default listeners are `127.0.0.1:28081`, `:28082`, and `:28083`. Override them with `MEMSHARE_INSTANCE_1_PORT`, `MEMSHARE_INSTANCE_2_PORT`, and `MEMSHARE_INSTANCE_3_PORT` when necessary. The script generates test-only credentials, writes a JSON result under `.gstack/qa-reports/`, and removes its containers, network, temporary files, and database volume unless `MEMSHARE_KEEP_MULTI_INSTANCE_STACK=1` is set.
+The Cargo executable is `target/debug/llm-memshare` or `target/release/llm-memshare`. The optional container image installs it as `memshare`. The server defaults to `127.0.0.1:8080`; environment files are not loaded automatically.
+
+## Cross-agent and cross-LLM handoffs
+
+```text
+Target owner grants Agent A permission to hand off to Agent B
+                              |
+Agent A + model A -- create --> queued task (version 1)
+                              |
+Agent B + model B -- inbox ---> discover task
+                 -- claim ---> claimed task (version 2, bounded lease)
+                 -- work ----> model/tool execution in B's orchestrator
+                 -- complete > completed task (version 3, typed result)
+                              |
+Agent A ---------- read ------> consume result
+```
+
+Both agents belong to the same tenant workspace. Reading a handoff does not grant access to its referenced memories: each reference is reauthorized for the reader. OpenAI-style `function_call` and Anthropic-style `tool_use` mappings support the same create/claim/complete operations. These mappings are tested with deterministic fixtures; live provider inference and provider sessions remain the orchestrator's responsibility.
+
+Use the [integration walkthrough](docs/INTEGRATIONS.md) for runnable HTTP examples and the [tool schemas](contracts/handoff-tools-v1.json) for model tool registration.
+
+## API and verification
+
+Public endpoints: `GET /health/live`, `GET /health/ready`, `GET /v1/openapi.json`, and `GET /v1/tool-contracts/handoff`. All resource routes use bearer authentication. The embedded OpenAPI document is a route inventory; [API documentation](docs/API.md) and the handoff tool schema provide request details.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --lib
+
+# Use a dedicated local test server with database/role creation privileges.
+MEMSHARE_TEST_DATABASE_URL='postgresql://TEST_ADMIN:TEST_PASSWORD@127.0.0.1:5432/postgres' \
+  cargo test --all-targets --all-features
+```
+
+Integration tests create a temporary database and run requests through a non-owner runtime role. [Testing documentation](docs/TEST_PLAN.md) describes coverage and remaining gaps. The optional `scripts/verify-multi-instance.sh` system test uses Docker Compose; it is separate from the local Cargo workflow.
+
+## Documentation
+
+Start with the [documentation index](docs/README.md), [setup guide](docs/GETTING_STARTED.md), [architecture](docs/ARCHITECTURE.md), [API](docs/API.md), [integrations](docs/INTEGRATIONS.md), and [operations](docs/OPERATIONS.md).
+
+The current release does not include model inference, private reasoning/session transfer, MCP/A2A conformance, semantic/vector retrieval, proposal approval, administrative hard deletion, or a published external SDK. See the [roadmap](docs/ROADMAP.md) and [implementation plan](docs/IMPLEMENTATION_PLAN.md).
+
+Contributions follow [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities through [private vulnerability reporting](https://github.com/jamessfbay/LLM-MemShare/security/advisories/new), as described in the [security policy](.github/SECURITY.md). Licensed under [Apache-2.0](LICENSE).

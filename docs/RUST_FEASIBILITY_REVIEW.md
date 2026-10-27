@@ -76,10 +76,10 @@ Required next tests:
 
 - Connection reuse after commit, rollback, cancellation and error.
 - Credential expiry, revocation and tenant suspension.
-- Workspace/project membership removal and role boundaries.
+- Expanded workspace/project role boundaries and offboarding cases; membership-removal paths now have integration coverage.
 - Idempotency replay after revoke, delete and expiry, plus concurrent duplicates.
 - Conditional delete conflicts and finer-grained deterministic barriers. A three-instance system test now proves one winner and one 409 for simultaneous same-version updates.
-- Handoff listing/cancellation, grant-revocation ordering, expiration, and concurrent claim/complete barriers. Creation, reference omission, participant visibility, version conflict, two provider-envelope mappings, and cross-tenant rejection are covered.
+- Handoff grant-revocation ordering, expiration, and concurrent claim/complete barriers. Listing, cancellation, claim/release, creation, reference omission, participant visibility, version conflict, provider-envelope mappings, and cross-tenant rejection are covered by the current integration journey.
 - Clean install, representative legacy upgrade and failed-migration recovery.
 - Expand the runtime catalog audit to cover role assumption and every schema privilege; owner, superuser, `BYPASSRLS`, `CREATEROLE`, `CREATEDB`, and table ownership are already rejected at startup.
 

@@ -1,6 +1,8 @@
 # Multi-tenant isolation: implementation design
 
-Status: proposed implementation contract, not a description of current behavior. The existing prototype must not be deployed as a production tenant isolation boundary. This document refines [the implementation plan](IMPLEMENTATION_PLAN.md); its decisions must be reviewed with the threat model before implementation.
+Status: target policy and production release requirements. Parts are implemented in the Rust alpha; this document is not a claim that every requirement below is complete. The [architecture](ARCHITECTURE.md), [API](API.md), and [security boundaries](SECURITY.md) describe current behavior. This document refines [the implementation plan](IMPLEMENTATION_PLAN.md).
+
+Current gaps include owner-agent disablement cascades, comprehensive grant revocation during offboarding, run credentials, proposal/review and export paths, administrative hard deletion, audit-reader controls, denial auditing, and complete policy-matrix tests. The current handoff API reports omitted-reference counts, while section 5 proposes a stricter boolean-only indicator. Current handoff cursors encode `(created_at,id)` and reauthorize each page; they are not signed or bound to filters. These target changes require implementation and tests before they can be claimed as guarantees.
 
 ## 1. Boundary and guarantees
 

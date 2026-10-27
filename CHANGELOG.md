@@ -6,6 +6,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ### Added
 
+- Public documentation with text architecture diagrams, a local PostgreSQL setup guide, a two-agent cross-LLM walkthrough, and operator recovery instructions.
+
 - Rust 1.89 service using Axum, Tokio, SQLx, Serde, and structured tracing.
 - Tenant-aware PostgreSQL schema with composite foreign keys, row-level security, embedded migrations, memory history, idempotency, and audit metadata.
 - Operator bootstrap and tenant provisioning commands.
@@ -21,6 +23,11 @@ All notable changes are documented here. The project follows Semantic Versioning
 ### Removed
 
 - The obsolete Python runtime, package metadata, tests, and client example. Rust is now the only supported implementation and `memshare` executable.
+
+### Fixed
+
+- Release artifact collection now uses Cargo's actual `llm-memshare` executable path.
+- Documentation distinguishes implemented behavior, target policy, local validation, and provider-envelope fixtures.
 
 ### Security
 
