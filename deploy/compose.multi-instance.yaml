@@ -1,0 +1,64 @@
+name: memshare-multi
+
+x-runtime: &runtime
+  image: llm-memshare:local
+  environment: &runtime-environment
+    MEMSHARE_DATABASE_URL: postgresql://memshare_runtime:${MEMSHARE_POSTGRES_RUNTIME_PASSWORD}@postgres:5432/memshare
+    RUST_LOG: ${RUST_LOG:-llm_memshare=info,tower_http=info}
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  healthcheck:
+    test: ["CMD", "memshare", "healthcheck"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: memshare_admin
+      POSTGRES_PASSWORD: ${MEMSHARE_POSTGRES_ADMIN_PASSWORD:?Set the database initialization administrator password}
+      POSTGRES_DB: memshare
+      MEMSHARE_OWNER_PASSWORD: ${MEMSHARE_POSTGRES_OWNER_PASSWORD:?Set the schema owner password}
+      MEMSHARE_RUNTIME_PASSWORD: ${MEMSHARE_POSTGRES_RUNTIME_PASSWORD:?Set the runtime password}
+    volumes:
+      - memshare-multi-postgres:/var/lib/postgresql/data
+      - ./init-roles.sh:/docker-entrypoint-initdb.d/10-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memshare_admin -d memshare"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    image: llm-memshare:local
+    build:
+      context: ..
+    command: ["migrate"]
+    environment:
+      MEMSHARE_DATABASE_URL: postgresql://memshare_owner:${MEMSHARE_POSTGRES_OWNER_PASSWORD}@postgres:5432/memshare
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  memshare-1:
+    <<: *runtime
+    ports:
+      - "127.0.0.1:${MEMSHARE_INSTANCE_1_PORT:-28081}:8080"
+
+  memshare-2:
+    <<: *runtime
+    ports:
+      - "127.0.0.1:${MEMSHARE_INSTANCE_2_PORT:-28082}:8080"
+
+  memshare-3:
+    <<: *runtime
+    ports:
+      - "127.0.0.1:${MEMSHARE_INSTANCE_3_PORT:-28083}:8080"
+
+volumes:
+  memshare-multi-postgres:

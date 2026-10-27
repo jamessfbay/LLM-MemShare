@@ -1,0 +1,71 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "LLM-MemShare API",
+    "version": "0.1.0",
+    "description": "Tenant-scoped memory and agent handoff middleware. The bearer token establishes the tenant and principal."
+  },
+  "servers": [{"url": "http://127.0.0.1:8080"}],
+  "security": [{"bearerAuth": []}],
+  "paths": {
+    "/health/live": {"get": {"security": [], "responses": {"200": {"description": "Live"}}}},
+    "/health/ready": {"get": {"security": [], "responses": {"200": {"description": "Ready"}}}},
+    "/v1/openapi.json": {"get": {"security": [], "responses": {"200": {"description": "This OpenAPI contract"}}}},
+    "/v1/tool-contracts/handoff": {"get": {"security": [], "responses": {"200": {"description": "Handoff tool schemas"}}}},
+    "/v1/principals": {"post": {"responses": {"201": {"description": "Principal and one-time credential created"}}}},
+    "/v1/principals/{principal_id}": {"patch": {"parameters": [{"$ref": "#/components/parameters/PrincipalId"}], "responses": {"200": {"description": "Principal status updated"}}}},
+    "/v1/principals/{principal_id}/credentials": {"post": {"parameters": [{"$ref": "#/components/parameters/PrincipalId"}], "responses": {"201": {"description": "Credential rotated"}}}},
+    "/v1/tenant": {"patch": {"responses": {"200": {"description": "Tenant status updated"}}}},
+    "/v1/workspaces": {"post": {"responses": {"201": {"description": "Workspace created"}}}},
+    "/v1/workspaces/{workspace_id}/members/{principal_id}": {
+      "put": {"parameters": [{"$ref": "#/components/parameters/WorkspaceId"},{"$ref": "#/components/parameters/PrincipalId"}], "responses": {"200": {"description": "Membership active"}}},
+      "delete": {"parameters": [{"$ref": "#/components/parameters/WorkspaceId"},{"$ref": "#/components/parameters/PrincipalId"}], "responses": {"200": {"description": "Membership removed"}}}
+    },
+    "/v1/workspaces/{workspace_id}/projects": {"post": {"parameters": [{"$ref": "#/components/parameters/WorkspaceId"}], "responses": {"201": {"description": "Project created"}}}},
+    "/v1/workspaces/{workspace_id}/projects/{project_id}/members/{principal_id}": {
+      "put": {"parameters": [{"$ref": "#/components/parameters/WorkspaceId"},{"$ref": "#/components/parameters/ProjectId"},{"$ref": "#/components/parameters/PrincipalId"}], "responses": {"200": {"description": "Membership active"}}},
+      "delete": {"parameters": [{"$ref": "#/components/parameters/WorkspaceId"},{"$ref": "#/components/parameters/ProjectId"},{"$ref": "#/components/parameters/PrincipalId"}], "responses": {"200": {"description": "Membership removed"}}}
+    },
+    "/v1/agents": {"post": {"responses": {"201": {"description": "Agent and one-time credential created"}}}},
+    "/v1/grants": {"post": {"responses": {"201": {"description": "Grant created"}}}},
+    "/v1/grants/{grant_id}": {"delete": {"parameters": [{"$ref": "#/components/parameters/GrantId"}], "responses": {"200": {"description": "Grant revoked"}}}},
+    "/v1/credentials/{credential_id}": {"delete": {"parameters": [{"$ref": "#/components/parameters/CredentialId"}], "responses": {"200": {"description": "Credential revoked"}}}},
+    "/v1/memories": {
+      "get": {"responses": {"200": {"description": "Authorized memories"}}},
+      "post": {"parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}], "responses": {"201": {"description": "Memory created"}}}
+    },
+    "/v1/memories/{memory_id}": {
+      "get": {"parameters": [{"$ref": "#/components/parameters/MemoryId"}], "responses": {"200": {"description": "Memory"}}},
+      "patch": {"parameters": [{"$ref": "#/components/parameters/MemoryId"}], "responses": {"200": {"description": "Memory updated"}}},
+      "delete": {"parameters": [{"$ref": "#/components/parameters/MemoryId"}], "responses": {"200": {"description": "Memory deleted"}}}
+    },
+    "/v1/handoffs": {
+      "get": {"responses": {"200": {"description": "Agent inbox or outbox"}}},
+      "post": {"parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}], "responses": {"201": {"description": "Handoff created"}}}
+    },
+    "/v1/handoffs/{handoff_id}": {"get": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Handoff"}}}},
+    "/v1/handoffs/{handoff_id}/claim": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Lease acquired"}}}},
+    "/v1/handoffs/{handoff_id}/release": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Handoff requeued"}}}},
+    "/v1/handoffs/{handoff_id}/complete": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Handoff completed"}}}},
+    "/v1/handoffs/{handoff_id}/cancel": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Handoff cancelled"}}}},
+    "/v1/adapters/openai/handoffs": {"post": {"parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}], "responses": {"201": {"description": "Handoff created from a function call"}}}},
+    "/v1/adapters/openai/handoffs/{handoff_id}/claim": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Lease acquired from a function call"}}}},
+    "/v1/adapters/openai/handoffs/{handoff_id}/complete": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Handoff completed from a function call"}}}},
+    "/v1/adapters/anthropic/handoffs": {"post": {"parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}], "responses": {"201": {"description": "Handoff created from a tool-use block"}}}},
+    "/v1/adapters/anthropic/handoffs/{handoff_id}/claim": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Lease acquired from a tool-use block"}}}},
+    "/v1/adapters/anthropic/handoffs/{handoff_id}/complete": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Handoff completed from a tool-use block"}}}}
+  },
+  "components": {
+    "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}},
+    "parameters": {
+      "IdempotencyKey": {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "maxLength": 200}},
+      "PrincipalId": {"name": "principal_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+      "WorkspaceId": {"name": "workspace_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+      "ProjectId": {"name": "project_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+      "GrantId": {"name": "grant_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+      "CredentialId": {"name": "credential_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+      "MemoryId": {"name": "memory_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+      "HandoffId": {"name": "handoff_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+    }
+  }
+}

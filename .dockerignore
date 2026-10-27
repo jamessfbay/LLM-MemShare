@@ -1,0 +1,8 @@
+.git
+.github
+.pytest_cache
+.venv
+target
+tests
+src/llm_memshare
+src/llm_memshare.egg-info

@@ -1,0 +1,85 @@
+{
+  "contract": "memshare.handoff-tools",
+  "version": "1.0",
+  "tools": [
+    {
+      "name": "memshare_create_handoff",
+      "description": "Create a permissioned task handoff from the authenticated source agent to a target agent.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["workspace_id", "target_agent_id", "task", "input_memory_ids", "source", "expires_at"],
+        "properties": {
+          "workspace_id": {"type": "string", "format": "uuid"},
+          "target_agent_id": {"type": "string", "format": "uuid"},
+          "task": {"$ref": "#/$defs/handoff_task"},
+          "input_memory_ids": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"type": "string", "format": "uuid"}},
+          "source": {"$ref": "#/$defs/model_identity"},
+          "expires_at": {"type": ["string", "null"], "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "memshare_claim_handoff",
+      "description": "Atomically claim a queued handoff as its authenticated target agent.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version"],
+        "properties": {
+          "version": {"type": "integer", "minimum": 1},
+          "lease_seconds": {"type": ["integer", "null"], "minimum": 30, "maximum": 3600}
+        }
+      }
+    },
+    {
+      "name": "memshare_complete_handoff",
+      "description": "Complete a claimed handoff as its authenticated target agent.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version", "result", "result_memory_ids", "source"],
+        "properties": {
+          "version": {"type": "integer", "minimum": 1},
+          "result": {"$ref": "#/$defs/handoff_result"},
+          "result_memory_ids": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"type": "string", "format": "uuid"}},
+          "source": {"$ref": "#/$defs/model_identity"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "handoff_task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "summary", "data"],
+      "properties": {
+        "protocol_version": {"type": "string", "const": "1.0"},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "instructions": {"type": ["string", "null"], "maxLength": 20000},
+        "data": {"type": "object"}
+      }
+    },
+    "handoff_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "summary", "outcome", "data"],
+      "properties": {
+        "protocol_version": {"type": "string", "const": "1.0"},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "outcome": {"type": "string", "enum": ["succeeded", "failed"]},
+        "data": {"type": "object"}
+      }
+    },
+    "model_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model"],
+      "properties": {
+        "provider": {"type": "string", "minLength": 1, "maxLength": 200},
+        "model": {"type": "string", "minLength": 1, "maxLength": 200},
+        "framework": {"type": ["string", "null"], "minLength": 1, "maxLength": 200}
+      }
+    }
+  }
+}
