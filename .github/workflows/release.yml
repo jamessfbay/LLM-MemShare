@@ -23,7 +23,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
-      - run: cp target/release/memshare ${{ matrix.artifact }}
+      - run: cp target/release/llm-memshare ${{ matrix.artifact }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
