@@ -311,11 +311,28 @@ async fn update_principal_status(
             return Err(AppError::invalid("only users may be tenant administrators"));
         }
     }
+    if body.status.as_deref() == Some("active") {
+        let owner_id: Option<Uuid> = sqlx::query_scalar::<_, Uuid>("SELECT owner_principal_id FROM memshare.principals WHERE tenant_id=$1 AND id=$2 AND kind='agent'")
+            .bind(actor.tenant_id).bind(principal_id).fetch_optional(&mut *tx).await?;
+        if let Some(owner_id) = owner_id {
+            let owner_active: Option<bool> = sqlx::query_scalar("SELECT status='active' FROM memshare.principals WHERE tenant_id=$1 AND id=$2 FOR UPDATE")
+                .bind(actor.tenant_id).bind(owner_id).fetch_optional(&mut *tx).await?;
+            if owner_active != Some(true) {
+                return Err(AppError::invalid(
+                    "an agent cannot be activated while its owner is inactive",
+                ));
+            }
+        }
+    }
     let result = sqlx::query_as::<_, PrincipalResponse>("UPDATE memshare.principals SET status=COALESCE($1,status),tenant_role=COALESCE($2,tenant_role),updated_at=now() WHERE tenant_id=$3 AND id=$4 RETURNING id,status,tenant_role")
         .bind(&body.status).bind(&body.tenant_role).bind(actor.tenant_id).bind(principal_id)
         .fetch_optional(&mut *tx).await?.ok_or_else(AppError::not_found)?;
     if body.status.as_deref() == Some("disabled") {
-        sqlx::query("UPDATE memshare.credentials SET status='revoked',revoked_at=now() WHERE tenant_id=$1 AND principal_id=$2 AND status='active'")
+        sqlx::query("UPDATE memshare.principals SET status='disabled',updated_at=now() WHERE tenant_id=$1 AND owner_principal_id=$2 AND kind='agent' AND status='active'")
+            .bind(actor.tenant_id).bind(principal_id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE memshare.credentials c SET status='revoked',revoked_at=now() WHERE c.tenant_id=$1 AND c.status='active' AND (c.principal_id=$2 OR EXISTS(SELECT 1 FROM memshare.principals owned WHERE owned.tenant_id=c.tenant_id AND owned.id=c.principal_id AND owned.owner_principal_id=$2 AND owned.kind='agent'))")
+            .bind(actor.tenant_id).bind(principal_id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE memshare.grants g SET revoked_at=now() WHERE g.tenant_id=$1 AND g.revoked_at IS NULL AND (g.subject_principal_id=$2 OR g.issuer_principal_id=$2 OR (g.scope='agent' AND g.scope_id=$2) OR EXISTS(SELECT 1 FROM memshare.principals owned WHERE owned.tenant_id=g.tenant_id AND owned.owner_principal_id=$2 AND owned.kind='agent' AND (owned.id IN (g.subject_principal_id,g.issuer_principal_id) OR (g.scope='agent' AND owned.id=g.scope_id))))")
             .bind(actor.tenant_id).bind(principal_id).execute(&mut *tx).await?;
     }
     audit(
@@ -340,17 +357,36 @@ async fn rotate_credential(
     if actor.principal_id != principal_id {
         require_tenant_admin(&mut tx, &actor).await?;
     }
-    let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memshare.principals WHERE tenant_id=$1 AND id=$2 AND status='active')")
-        .bind(actor.tenant_id).bind(principal_id).fetch_one(&mut *tx).await?;
-    if !active {
+    let active: Option<bool> = sqlx::query_scalar(
+        "SELECT status='active' FROM memshare.principals WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+    )
+    .bind(actor.tenant_id)
+    .bind(principal_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if active != Some(true) {
         return Err(AppError::not_found());
     }
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!(
+            "{}:{}:credential.rotate",
+            actor.tenant_id, principal_id
+        ))
+        .execute(&mut *tx)
+        .await?;
+    let expires_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT CASE WHEN bool_or(expires_at IS NULL) THEN NULL ELSE max(expires_at) END FROM memshare.credentials WHERE tenant_id=$1 AND principal_id=$2 AND status='active' AND (expires_at IS NULL OR expires_at>now())",
+    )
+    .bind(actor.tenant_id)
+    .bind(principal_id)
+    .fetch_one(&mut *tx)
+    .await?;
     sqlx::query("UPDATE memshare.credentials SET status='revoked',revoked_at=now() WHERE tenant_id=$1 AND principal_id=$2 AND status='active'")
         .bind(actor.tenant_id).bind(principal_id).execute(&mut *tx).await?;
     let credential_id = Uuid::new_v4();
     let token = issue_token();
-    sqlx::query("INSERT INTO memshare.credentials(id,tenant_id,principal_id,token_hash,status) VALUES ($1,$2,$3,$4,'active')")
-        .bind(credential_id).bind(actor.tenant_id).bind(principal_id).bind(token_hash(&token)).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO memshare.credentials(id,tenant_id,principal_id,token_hash,status,expires_at) VALUES ($1,$2,$3,$4,'active',$5)")
+        .bind(credential_id).bind(actor.tenant_id).bind(principal_id).bind(token_hash(&token)).bind(expires_at).execute(&mut *tx).await?;
     audit(
         &mut tx,
         &actor,
@@ -509,6 +545,8 @@ async fn remove_workspace_membership(
     }
     sqlx::query("UPDATE memshare.project_memberships SET status='removed',updated_at=now() WHERE tenant_id=$1 AND workspace_id=$2 AND principal_id=$3 AND status='active'")
         .bind(actor.tenant_id).bind(workspace_id).bind(principal_id).execute(&mut *tx).await?;
+    sqlx::query("UPDATE memshare.grants SET revoked_at=now() WHERE tenant_id=$1 AND workspace_id=$2 AND revoked_at IS NULL AND (subject_principal_id=$3 OR issuer_principal_id=$3 OR (scope='agent' AND scope_id=$3))")
+        .bind(actor.tenant_id).bind(workspace_id).bind(principal_id).execute(&mut *tx).await?;
     audit(
         &mut tx,
         &actor,
@@ -660,6 +698,7 @@ async fn create_agent(
         return Err(AppError::invalid("expires_at must be in the future"));
     }
     let mut tx = begin_tenant(&state.pool, &principal).await?;
+    require_active_principal(&mut tx, principal.tenant_id, principal.principal_id).await?;
     require_workspace_role(
         &mut tx,
         principal.tenant_id,
@@ -722,15 +761,77 @@ async fn create_grant(
         return Err(AppError::invalid("expires_at must be in the future"));
     }
     let mut tx = begin_tenant(&state.pool, &principal).await?;
-    let subject_is_member: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM memshare.workspace_memberships WHERE tenant_id=$1 AND workspace_id=$2 AND principal_id=$3 AND status='active')",
+    let mut participant_ids = if principal.principal_id == body.subject_principal_id {
+        vec![principal.principal_id]
+    } else {
+        vec![principal.principal_id, body.subject_principal_id]
+    };
+    if body.scope == "agent" {
+        participant_ids.push(body.scope_id);
+    }
+    participant_ids.sort_unstable();
+    participant_ids.dedup();
+    let actor_active: Option<bool> = sqlx::query_scalar(
+        "SELECT status='active' FROM memshare.principals WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+    )
+    .bind(principal.tenant_id)
+    .bind(principal.principal_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if actor_active != Some(true) {
+        return Err(AppError::forbidden());
+    }
+    let related_ids: Vec<Uuid> = participant_ids
+        .iter()
+        .copied()
+        .filter(|id| *id != principal.principal_id)
+        .collect();
+    let active_principals: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM memshare.principals WHERE tenant_id=$1 AND id=ANY($2) AND status='active' ORDER BY id FOR UPDATE",
+    )
+    .bind(principal.tenant_id)
+    .bind(&related_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    if body.subject_principal_id != principal.principal_id
+        && !active_principals.contains(&body.subject_principal_id)
+    {
+        return Err(AppError::not_found());
+    }
+    if body.scope == "agent"
+        && body.scope_id != principal.principal_id
+        && !active_principals.contains(&body.scope_id)
+    {
+        return Err(AppError::not_found());
+    }
+    let actor_is_member: Option<bool> = sqlx::query_scalar(
+        "SELECT status='active' FROM memshare.workspace_memberships WHERE tenant_id=$1 AND workspace_id=$2 AND principal_id=$3 FOR UPDATE",
     )
     .bind(principal.tenant_id)
     .bind(body.workspace_id)
-    .bind(body.subject_principal_id)
-    .fetch_one(&mut *tx)
+    .bind(principal.principal_id)
+    .fetch_optional(&mut *tx)
     .await?;
-    if !subject_is_member {
+    if actor_is_member != Some(true) {
+        return Err(AppError::forbidden());
+    }
+    let active_members: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT principal_id FROM memshare.workspace_memberships WHERE tenant_id=$1 AND workspace_id=$2 AND principal_id=ANY($3) AND status='active' ORDER BY principal_id FOR UPDATE",
+    )
+    .bind(principal.tenant_id)
+    .bind(body.workspace_id)
+    .bind(&related_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    if body.subject_principal_id != principal.principal_id
+        && !active_members.contains(&body.subject_principal_id)
+    {
+        return Err(AppError::not_found());
+    }
+    if body.scope == "agent"
+        && body.scope_id != principal.principal_id
+        && !active_members.contains(&body.scope_id)
+    {
         return Err(AppError::not_found());
     }
     authorize_grant_issuer(&mut tx, &principal, body.workspace_id, &body).await?;
@@ -826,6 +927,9 @@ async fn create_memory(
         ))
         .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM memshare.idempotency WHERE tenant_id=$1 AND principal_id=$2 AND operation='memory.create' AND key=$3 AND expires_at<=now()")
+        .bind(principal.tenant_id).bind(principal.principal_id).bind(&key)
+        .execute(&mut *tx).await?;
     if let Some((old_hash,result_id)) = sqlx::query_as::<_,(String,Uuid)>("SELECT input_hash,result_id FROM memshare.idempotency WHERE tenant_id=$1 AND principal_id=$2 AND operation='memory.create' AND key=$3 AND expires_at>now()")
         .bind(principal.tenant_id).bind(principal.principal_id).bind(&key)
         .fetch_optional(&mut *tx).await? {
@@ -915,6 +1019,9 @@ async fn create_handoff_inner(
         ))
         .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM memshare.idempotency WHERE tenant_id=$1 AND principal_id=$2 AND operation='handoff.create' AND key=$3 AND expires_at<=now()")
+        .bind(principal.tenant_id).bind(principal.principal_id).bind(&key)
+        .execute(&mut *tx).await?;
     if let Some((old_hash, result_id)) = sqlx::query_as::<_, (String, Uuid)>(
         "SELECT input_hash,result_id FROM memshare.idempotency WHERE tenant_id=$1 AND principal_id=$2 AND operation='handoff.create' AND key=$3 AND expires_at>now()",
     )
@@ -1500,7 +1607,8 @@ WHERE m.tenant_id=$1 AND m.id=ANY($3) AND m.deleted_at IS NULL
       SELECT 1 FROM memshare.workspace_memberships wm WHERE wm.tenant_id=m.tenant_id AND wm.workspace_id=m.workspace_id AND wm.principal_id=$2 AND wm.status='active'))
     OR (actor.kind='user' AND m.scope='project' AND EXISTS(
       SELECT 1 FROM memshare.project_memberships pm WHERE pm.tenant_id=m.tenant_id AND pm.workspace_id=m.workspace_id AND pm.project_id=m.project_id AND pm.principal_id=$2 AND pm.status='active'))
-    OR EXISTS(SELECT 1 FROM memshare.grants g WHERE g.tenant_id=m.tenant_id AND g.subject_principal_id=$2 AND g.workspace_id=m.workspace_id AND g.scope=m.scope AND g.scope_id=m.scope_id AND 'read'=ANY(g.actions) AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at>now()))
+    OR (EXISTS(SELECT 1 FROM memshare.workspace_memberships wm WHERE wm.tenant_id=m.tenant_id AND wm.workspace_id=m.workspace_id AND wm.principal_id=$2 AND wm.status='active')
+      AND EXISTS(SELECT 1 FROM memshare.grants g WHERE g.tenant_id=m.tenant_id AND g.subject_principal_id=$2 AND g.workspace_id=m.workspace_id AND g.scope=m.scope AND g.scope_id=m.scope_id AND 'read'=ANY(g.actions) AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at>now()) AND (g.scope<>'agent' OR EXISTS(SELECT 1 FROM memshare.workspace_memberships target_wm WHERE target_wm.tenant_id=g.tenant_id AND target_wm.workspace_id=g.workspace_id AND target_wm.principal_id=g.scope_id AND target_wm.status='active'))))
   )"#;
 
 fn verified_model_metadata(
@@ -1785,7 +1893,8 @@ WHERE m.tenant_id=$1 AND m.deleted_at IS NULL AND (m.expires_at IS NULL OR m.exp
       SELECT 1 FROM memshare.workspace_memberships wm WHERE wm.tenant_id=m.tenant_id AND wm.workspace_id=m.workspace_id AND wm.principal_id=$2 AND wm.status='active'))
     OR (actor.kind='user' AND m.scope='project' AND EXISTS(
       SELECT 1 FROM memshare.project_memberships pm WHERE pm.tenant_id=m.tenant_id AND pm.workspace_id=m.workspace_id AND pm.project_id=m.project_id AND pm.principal_id=$2 AND pm.status='active'))
-    OR EXISTS(SELECT 1 FROM memshare.grants g WHERE g.tenant_id=m.tenant_id AND g.subject_principal_id=$2 AND g.workspace_id=m.workspace_id AND g.scope=m.scope AND g.scope_id=m.scope_id AND 'read'=ANY(g.actions) AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at>now()))
+    OR (EXISTS(SELECT 1 FROM memshare.workspace_memberships wm WHERE wm.tenant_id=m.tenant_id AND wm.workspace_id=m.workspace_id AND wm.principal_id=$2 AND wm.status='active')
+      AND EXISTS(SELECT 1 FROM memshare.grants g WHERE g.tenant_id=m.tenant_id AND g.subject_principal_id=$2 AND g.workspace_id=m.workspace_id AND g.scope=m.scope AND g.scope_id=m.scope_id AND 'read'=ANY(g.actions) AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at>now()) AND (g.scope<>'agent' OR EXISTS(SELECT 1 FROM memshare.workspace_memberships target_wm WHERE target_wm.tenant_id=g.tenant_id AND target_wm.workspace_id=g.workspace_id AND target_wm.principal_id=g.scope_id AND target_wm.status='active'))))
   )"#
 }
 
@@ -1795,7 +1904,7 @@ async fn fetch_authorized_memory(
     id: Uuid,
     action: &str,
 ) -> AppResult<MemoryResponse> {
-    let value=sqlx::query_as::<_,MemoryResponse>(r#"SELECT m.id,m.workspace_id,m.project_id,m.scope,m.scope_id,m.owner_principal_id,m.creator_principal_id,m.kind,m.content,m.source,m.version,m.created_at,m.updated_at FROM memshare.memories m JOIN memshare.principals actor ON actor.tenant_id=m.tenant_id AND actor.id=$2 WHERE m.tenant_id=$1 AND m.id=$3 AND m.deleted_at IS NULL AND (m.expires_at IS NULL OR m.expires_at>now()) AND ((actor.kind='user' AND m.scope='private' AND m.owner_principal_id=$2) OR (actor.kind='user' AND m.scope='workspace' AND EXISTS(SELECT 1 FROM memshare.workspace_memberships wm WHERE wm.tenant_id=m.tenant_id AND wm.workspace_id=m.workspace_id AND wm.principal_id=$2 AND wm.status='active' AND ($4='read' OR wm.role='admin' OR m.creator_principal_id=$2))) OR (actor.kind='user' AND m.scope='project' AND EXISTS(SELECT 1 FROM memshare.project_memberships pm WHERE pm.tenant_id=m.tenant_id AND pm.workspace_id=m.workspace_id AND pm.project_id=m.project_id AND pm.principal_id=$2 AND pm.status='active' AND ($4='read' OR pm.role='admin' OR m.creator_principal_id=$2))) OR EXISTS(SELECT 1 FROM memshare.grants g WHERE g.tenant_id=m.tenant_id AND g.subject_principal_id=$2 AND g.workspace_id=m.workspace_id AND g.scope=m.scope AND g.scope_id=m.scope_id AND $4=ANY(g.actions) AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at>now())))"#)
+    let value=sqlx::query_as::<_,MemoryResponse>(r#"SELECT m.id,m.workspace_id,m.project_id,m.scope,m.scope_id,m.owner_principal_id,m.creator_principal_id,m.kind,m.content,m.source,m.version,m.created_at,m.updated_at FROM memshare.memories m JOIN memshare.principals actor ON actor.tenant_id=m.tenant_id AND actor.id=$2 WHERE m.tenant_id=$1 AND m.id=$3 AND m.deleted_at IS NULL AND (m.expires_at IS NULL OR m.expires_at>now()) AND ((actor.kind='user' AND m.scope='private' AND m.owner_principal_id=$2) OR (actor.kind='user' AND m.scope='workspace' AND EXISTS(SELECT 1 FROM memshare.workspace_memberships wm WHERE wm.tenant_id=m.tenant_id AND wm.workspace_id=m.workspace_id AND wm.principal_id=$2 AND wm.status='active' AND ($4='read' OR wm.role='admin' OR m.creator_principal_id=$2))) OR (actor.kind='user' AND m.scope='project' AND EXISTS(SELECT 1 FROM memshare.project_memberships pm WHERE pm.tenant_id=m.tenant_id AND pm.workspace_id=m.workspace_id AND pm.project_id=m.project_id AND pm.principal_id=$2 AND pm.status='active' AND ($4='read' OR pm.role='admin' OR m.creator_principal_id=$2))) OR (EXISTS(SELECT 1 FROM memshare.workspace_memberships wm WHERE wm.tenant_id=m.tenant_id AND wm.workspace_id=m.workspace_id AND wm.principal_id=$2 AND wm.status='active') AND EXISTS(SELECT 1 FROM memshare.grants g WHERE g.tenant_id=m.tenant_id AND g.subject_principal_id=$2 AND g.workspace_id=m.workspace_id AND g.scope=m.scope AND g.scope_id=m.scope_id AND $4=ANY(g.actions) AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at>now()) AND (g.scope<>'agent' OR EXISTS(SELECT 1 FROM memshare.workspace_memberships target_wm WHERE target_wm.tenant_id=g.tenant_id AND target_wm.workspace_id=g.workspace_id AND target_wm.principal_id=g.scope_id AND target_wm.status='active')))))"#)
         .bind(p.tenant_id).bind(p.principal_id).bind(id).bind(action).fetch_optional(&mut **tx).await?;
     value.ok_or_else(AppError::not_found)
 }
@@ -1806,7 +1915,7 @@ async fn fetch_authorized_memory_for_update(
     id: Uuid,
     action: &str,
 ) -> AppResult<MemoryResponse> {
-    let value=sqlx::query_as::<_,MemoryResponse>(r#"SELECT m.id,m.workspace_id,m.project_id,m.scope,m.scope_id,m.owner_principal_id,m.creator_principal_id,m.kind,m.content,m.source,m.version,m.created_at,m.updated_at FROM memshare.memories m JOIN memshare.principals actor ON actor.tenant_id=m.tenant_id AND actor.id=$2 WHERE m.tenant_id=$1 AND m.id=$3 AND m.deleted_at IS NULL AND (m.expires_at IS NULL OR m.expires_at>now()) AND ((actor.kind='user' AND m.scope='private' AND m.owner_principal_id=$2) OR (actor.kind='user' AND m.scope='workspace' AND EXISTS(SELECT 1 FROM memshare.workspace_memberships wm WHERE wm.tenant_id=m.tenant_id AND wm.workspace_id=m.workspace_id AND wm.principal_id=$2 AND wm.status='active' AND ($4='read' OR wm.role='admin' OR m.creator_principal_id=$2))) OR (actor.kind='user' AND m.scope='project' AND EXISTS(SELECT 1 FROM memshare.project_memberships pm WHERE pm.tenant_id=m.tenant_id AND pm.workspace_id=m.workspace_id AND pm.project_id=m.project_id AND pm.principal_id=$2 AND pm.status='active' AND ($4='read' OR pm.role='admin' OR m.creator_principal_id=$2))) OR EXISTS(SELECT 1 FROM memshare.grants g WHERE g.tenant_id=m.tenant_id AND g.subject_principal_id=$2 AND g.workspace_id=m.workspace_id AND g.scope=m.scope AND g.scope_id=m.scope_id AND $4=ANY(g.actions) AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at>now()))) FOR UPDATE OF m"#)
+    let value=sqlx::query_as::<_,MemoryResponse>(r#"SELECT m.id,m.workspace_id,m.project_id,m.scope,m.scope_id,m.owner_principal_id,m.creator_principal_id,m.kind,m.content,m.source,m.version,m.created_at,m.updated_at FROM memshare.memories m JOIN memshare.principals actor ON actor.tenant_id=m.tenant_id AND actor.id=$2 WHERE m.tenant_id=$1 AND m.id=$3 AND m.deleted_at IS NULL AND (m.expires_at IS NULL OR m.expires_at>now()) AND ((actor.kind='user' AND m.scope='private' AND m.owner_principal_id=$2) OR (actor.kind='user' AND m.scope='workspace' AND EXISTS(SELECT 1 FROM memshare.workspace_memberships wm WHERE wm.tenant_id=m.tenant_id AND wm.workspace_id=m.workspace_id AND wm.principal_id=$2 AND wm.status='active' AND ($4='read' OR wm.role='admin' OR m.creator_principal_id=$2))) OR (actor.kind='user' AND m.scope='project' AND EXISTS(SELECT 1 FROM memshare.project_memberships pm WHERE pm.tenant_id=m.tenant_id AND pm.workspace_id=m.workspace_id AND pm.project_id=m.project_id AND pm.principal_id=$2 AND pm.status='active' AND ($4='read' OR pm.role='admin' OR m.creator_principal_id=$2))) OR (EXISTS(SELECT 1 FROM memshare.workspace_memberships wm WHERE wm.tenant_id=m.tenant_id AND wm.workspace_id=m.workspace_id AND wm.principal_id=$2 AND wm.status='active') AND EXISTS(SELECT 1 FROM memshare.grants g WHERE g.tenant_id=m.tenant_id AND g.subject_principal_id=$2 AND g.workspace_id=m.workspace_id AND g.scope=m.scope AND g.scope_id=m.scope_id AND $4=ANY(g.actions) AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at>now()) AND (g.scope<>'agent' OR EXISTS(SELECT 1 FROM memshare.workspace_memberships target_wm WHERE target_wm.tenant_id=g.tenant_id AND target_wm.workspace_id=g.workspace_id AND target_wm.principal_id=g.scope_id AND target_wm.status='active'))))) FOR UPDATE OF m"#)
         .bind(p.tenant_id).bind(p.principal_id).bind(id).bind(action).fetch_optional(&mut **tx).await?;
     value.ok_or_else(AppError::not_found)
 }
@@ -1935,9 +2044,14 @@ async fn require_active_principal(
     tenant_id: Uuid,
     principal_id: Uuid,
 ) -> AppResult<()> {
-    let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memshare.principals WHERE tenant_id=$1 AND id=$2 AND status='active')")
-        .bind(tenant_id).bind(principal_id).fetch_one(&mut **tx).await?;
-    if active {
+    let active: Option<bool> = sqlx::query_scalar(
+        "SELECT status='active' FROM memshare.principals WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+    )
+    .bind(tenant_id)
+    .bind(principal_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if active == Some(true) {
         Ok(())
     } else {
         Err(AppError::not_found())
@@ -2000,7 +2114,7 @@ async fn has_grant(
     scope_id: Uuid,
     action: &str,
 ) -> AppResult<bool> {
-    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memshare.grants WHERE tenant_id=$1 AND subject_principal_id=$2 AND workspace_id=$3 AND scope=$4 AND scope_id=$5 AND $6=ANY(actions) AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now()))").bind(p.tenant_id).bind(p.principal_id).bind(workspace).bind(scope).bind(scope_id).bind(action).fetch_one(&mut **tx).await?)
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memshare.grants g WHERE g.tenant_id=$1 AND g.subject_principal_id=$2 AND g.workspace_id=$3 AND g.scope=$4 AND g.scope_id=$5 AND $6=ANY(g.actions) AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at>now()) AND EXISTS(SELECT 1 FROM memshare.workspace_memberships wm WHERE wm.tenant_id=g.tenant_id AND wm.workspace_id=g.workspace_id AND wm.principal_id=g.subject_principal_id AND wm.status='active') AND (g.scope<>'agent' OR EXISTS(SELECT 1 FROM memshare.workspace_memberships target_wm WHERE target_wm.tenant_id=g.tenant_id AND target_wm.workspace_id=g.workspace_id AND target_wm.principal_id=g.scope_id AND target_wm.status='active')))").bind(p.tenant_id).bind(p.principal_id).bind(workspace).bind(scope).bind(scope_id).bind(action).fetch_one(&mut **tx).await?)
 }
 
 async fn audit(

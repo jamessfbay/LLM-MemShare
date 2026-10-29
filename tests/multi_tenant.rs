@@ -4,8 +4,10 @@ use axum::{
 };
 use llm_memshare::{
     auth::AppState,
-    db::{issue_token, token_hash, verify_runtime_role},
-    migrate, router,
+    db::{begin_tenant, issue_token, token_hash, verify_runtime_role},
+    migrate,
+    model::PrincipalContext,
+    router,
 };
 use serde_json::{json, Value};
 use sqlx::{
@@ -102,7 +104,7 @@ async fn response_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).expect("json response")
 }
 
-async fn runtime_pool(options: PgConnectOptions, admin: &PgPool) -> PgPool {
+async fn runtime_pool(options: PgConnectOptions, admin: &PgPool) -> (PgPool, String) {
     let role = format!("memshare_runtime_{}", Uuid::new_v4().simple());
     sqlx::query(&format!("CREATE ROLE {role} NOLOGIN NOBYPASSRLS"))
         .execute(admin)
@@ -125,18 +127,22 @@ async fn runtime_pool(options: PgConnectOptions, admin: &PgPool) -> PgPool {
     .await
     .expect("grant authentication function");
 
-    PgPoolOptions::new()
+    let pool = PgPoolOptions::new()
         .max_connections(10)
-        .after_connect(move |connection, _| {
-            let statement = format!("SET ROLE {role}");
-            Box::pin(async move {
-                sqlx::query(&statement).execute(connection).await?;
-                Ok(())
-            })
+        .after_connect({
+            let role = role.clone();
+            move |connection, _| {
+                let statement = format!("SET ROLE {role}");
+                Box::pin(async move {
+                    sqlx::query(&statement).execute(connection).await?;
+                    Ok(())
+                })
+            }
         })
         .connect_with(options)
         .await
-        .expect("connect runtime pool")
+        .expect("connect runtime pool");
+    (pool, role)
 }
 
 fn request(method: &str, uri: String, token: &str, body: Option<Value>) -> Request<Body> {
@@ -154,6 +160,10 @@ fn request(method: &str, uri: String, token: &str, body: Option<Value>) -> Reque
 
 #[tokio::test]
 async fn tenant_isolation_grant_and_revocation_flow() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
+        .with_test_writer()
+        .try_init();
     let database_url = std::env::var("MEMSHARE_TEST_DATABASE_URL")
         .expect("MEMSHARE_TEST_DATABASE_URL is required for integration tests");
     let options = PgConnectOptions::from_str(&database_url).expect("valid test database URL");
@@ -177,7 +187,7 @@ async fn tenant_isolation_grant_and_revocation_flow() {
     let a = fixture(&admin_pool, "tenant-a").await;
     let member = workspace_member_fixture(&admin_pool, &a).await;
     let b = fixture(&admin_pool, "tenant-b").await;
-    let pool = runtime_pool(test_options, &admin_pool).await;
+    let (pool, runtime_role) = runtime_pool(test_options, &admin_pool).await;
     assert!(verify_runtime_role(&pool).await.is_ok());
     assert!(verify_runtime_role(&admin_pool).await.is_err());
     let app = router(AppState { pool: pool.clone() });
@@ -193,22 +203,155 @@ async fn tenant_isolation_grant_and_revocation_flow() {
         .await
         .unwrap();
     assert_eq!(delegated_admin.status(), StatusCode::CREATED);
-    let delegated_admin_token = response_json(delegated_admin).await["token"]
+    let delegated_admin = response_json(delegated_admin).await;
+    let delegated_admin_id = delegated_admin["principal_id"].as_str().unwrap().to_owned();
+    let delegated_admin_token = delegated_admin["token"].as_str().unwrap().to_owned();
+    let delegated_workspace = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/workspaces".to_owned(),
+            &delegated_admin_token,
+            Some(json!({"slug":"delegated"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delegated_workspace.status(), StatusCode::CREATED);
+    let delegated_workspace_id = response_json(delegated_workspace).await["id"]
         .as_str()
         .unwrap()
         .to_owned();
+    let delegated_agent = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/agents".to_owned(),
+            &delegated_admin_token,
+            Some(json!({"name":"delegated-agent","workspace_id":delegated_workspace_id,"expires_at":null})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delegated_agent.status(), StatusCode::CREATED);
+    let delegated_agent = response_json(delegated_agent).await;
+    let delegated_agent_id = delegated_agent["principal_id"].as_str().unwrap();
+    let delegated_agent_token = delegated_agent["token"].as_str().unwrap();
+    let delegated_grant = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/grants".to_owned(),
+            &delegated_admin_token,
+            Some(json!({
+                "subject_principal_id":delegated_agent_id,
+                "workspace_id":delegated_workspace_id,
+                "scope":"agent",
+                "scope_id":delegated_agent_id,
+                "actions":["read","write","delete"],
+                "expires_at":null
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delegated_grant.status(), StatusCode::CREATED);
+    let delegated_grant_id = response_json(delegated_grant).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let disable_owner = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            format!("/v1/principals/{delegated_admin_id}"),
+            &a.token,
+            Some(json!({"status":"disabled"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(disable_owner.status(), StatusCode::OK);
     assert_eq!(
         app.clone()
             .oneshot(request(
-                "POST",
-                "/v1/workspaces".to_owned(),
-                &delegated_admin_token,
-                Some(json!({"slug":"delegated"})),
+                "GET",
+                "/v1/memories".to_owned(),
+                delegated_agent_token,
+                None,
             ))
             .await
             .unwrap()
             .status(),
-        StatusCode::CREATED
+        StatusCode::UNAUTHORIZED
+    );
+    let delegated_agent_status: String =
+        sqlx::query_scalar("SELECT status FROM memshare.principals WHERE tenant_id=$1 AND id=$2")
+            .bind(a.tenant_id)
+            .bind(Uuid::parse_str(delegated_agent_id).unwrap())
+            .fetch_one(&admin_pool)
+            .await
+            .unwrap();
+    assert_eq!(delegated_agent_status, "disabled");
+    let delegated_grant_revoked: bool = sqlx::query_scalar(
+        "SELECT revoked_at IS NOT NULL FROM memshare.grants WHERE tenant_id=$1 AND id=$2",
+    )
+    .bind(a.tenant_id)
+    .bind(Uuid::parse_str(&delegated_grant_id).unwrap())
+    .fetch_one(&admin_pool)
+    .await
+    .unwrap();
+    assert!(delegated_grant_revoked);
+    let blocked_reactivation = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            format!("/v1/principals/{delegated_agent_id}"),
+            &a.token,
+            Some(json!({"status":"active"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(blocked_reactivation.status(), StatusCode::BAD_REQUEST);
+    let restored_agent_token = issue_token();
+    let restored_agent_credential_id = Uuid::new_v4();
+    let mut restore_agent = admin_pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('memshare.tenant_id',$1,true),set_config('memshare.principal_id',$2,true)")
+        .bind(a.tenant_id.to_string())
+        .bind(a.principal_id.to_string())
+        .execute(&mut *restore_agent)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memshare.principals SET status='active' WHERE tenant_id=$1 AND id=$2")
+        .bind(a.tenant_id)
+        .bind(Uuid::parse_str(delegated_agent_id).unwrap())
+        .execute(&mut *restore_agent)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO memshare.credentials(id,tenant_id,principal_id,token_hash,status) VALUES ($1,$2,$3,$4,'active')")
+        .bind(restored_agent_credential_id)
+        .bind(a.tenant_id)
+        .bind(Uuid::parse_str(delegated_agent_id).unwrap())
+        .bind(token_hash(&restored_agent_token))
+        .execute(&mut *restore_agent)
+        .await
+        .unwrap();
+    restore_agent.commit().await.unwrap();
+    let restored_agent_context = PrincipalContext {
+        credential_id: restored_agent_credential_id,
+        tenant_id: a.tenant_id,
+        principal_id: Uuid::parse_str(delegated_agent_id).unwrap(),
+        kind: "agent".to_owned(),
+    };
+    assert!(begin_tenant(&pool, &restored_agent_context).await.is_err());
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/v1/memories".to_owned(),
+                &restored_agent_token,
+                None,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
     );
 
     let service = app
@@ -217,14 +360,21 @@ async fn tenant_isolation_grant_and_revocation_flow() {
             "POST",
             "/v1/principals".to_owned(),
             &a.token,
-            Some(json!({"kind":"service","name":"indexer","expires_at":null})),
+            Some(json!({"kind":"service","name":"indexer","expires_at":"2099-01-01T00:00:00Z"})),
         ))
         .await
         .unwrap();
     assert_eq!(service.status(), StatusCode::CREATED);
     let service = response_json(service).await;
     let service_id = service["principal_id"].as_str().unwrap();
+    let service_credential_id = service["credential_id"].as_str().unwrap();
     let old_service_token = service["token"].as_str().unwrap();
+    let original_service_expiry: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT expires_at FROM memshare.credentials WHERE id=$1")
+            .bind(Uuid::parse_str(service_credential_id).unwrap())
+            .fetch_one(&admin_pool)
+            .await
+            .unwrap();
     let workspace = app
         .clone()
         .oneshot(request(
@@ -292,6 +442,15 @@ async fn tenant_isolation_grant_and_revocation_flow() {
     assert_eq!(rotated.status(), StatusCode::CREATED);
     let rotated = response_json(rotated).await;
     assert_ne!(rotated["token"], old_service_token);
+    let rotated_credential_id = rotated["credential_id"].as_str().unwrap();
+    let rotated_service_expiry: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT expires_at FROM memshare.credentials WHERE id=$1")
+            .bind(Uuid::parse_str(rotated_credential_id).unwrap())
+            .fetch_one(&admin_pool)
+            .await
+            .unwrap();
+    assert_eq!(rotated_service_expiry, original_service_expiry);
+    assert!(rotated_service_expiry.is_some());
     let rotated_service_token = rotated["token"].as_str().unwrap();
     assert_eq!(
         app.clone()
@@ -306,6 +465,168 @@ async fn tenant_isolation_grant_and_revocation_flow() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
+    let permanent_service = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/principals".to_owned(),
+            &a.token,
+            Some(json!({"kind":"service","name":"permanent-indexer","expires_at":null})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(permanent_service.status(), StatusCode::CREATED);
+    let permanent_service = response_json(permanent_service).await;
+    let permanent_service_id = permanent_service["principal_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let permanent_rotation = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            format!("/v1/principals/{permanent_service_id}/credentials"),
+            &a.token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(permanent_rotation.status(), StatusCode::CREATED);
+    let permanent_rotation = response_json(permanent_rotation).await;
+    let permanent_expiry: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT expires_at FROM memshare.credentials WHERE id=$1")
+            .bind(Uuid::parse_str(permanent_rotation["credential_id"].as_str().unwrap()).unwrap())
+            .fetch_one(&admin_pool)
+            .await
+            .unwrap();
+    assert_eq!(permanent_expiry, None);
+    let first_rotation = request(
+        "POST",
+        format!("/v1/principals/{permanent_service_id}/credentials"),
+        &a.token,
+        None,
+    );
+    let second_rotation = request(
+        "POST",
+        format!("/v1/principals/{permanent_service_id}/credentials"),
+        &a.token,
+        None,
+    );
+    let (first_rotation, second_rotation) = tokio::join!(
+        app.clone().oneshot(first_rotation),
+        app.clone().oneshot(second_rotation)
+    );
+    assert_eq!(first_rotation.unwrap().status(), StatusCode::CREATED);
+    assert_eq!(second_rotation.unwrap().status(), StatusCode::CREATED);
+    let active_permanent_credentials: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM memshare.credentials WHERE tenant_id=$1 AND principal_id=$2 AND status='active'",
+    )
+    .bind(a.tenant_id)
+    .bind(Uuid::parse_str(&permanent_service_id).unwrap())
+    .fetch_one(&admin_pool)
+    .await
+    .unwrap();
+    assert_eq!(active_permanent_credentials, 1);
+    let recovery_service = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/principals".to_owned(),
+            &a.token,
+            Some(json!({"kind":"service","name":"expired-recovery","expires_at":"2099-01-01T00:00:00Z"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recovery_service.status(), StatusCode::CREATED);
+    let recovery_service = response_json(recovery_service).await;
+    let recovery_service_id = recovery_service["principal_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    sqlx::query("UPDATE memshare.credentials SET expires_at=now()-interval '1 second' WHERE id=$1")
+        .bind(Uuid::parse_str(recovery_service["credential_id"].as_str().unwrap()).unwrap())
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    let recovered_credential = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            format!("/v1/principals/{recovery_service_id}/credentials"),
+            &a.token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recovered_credential.status(), StatusCode::CREATED);
+    let recovered_credential = response_json(recovered_credential).await;
+    let recovered_expiry: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT expires_at FROM memshare.credentials WHERE id=$1")
+            .bind(Uuid::parse_str(recovered_credential["credential_id"].as_str().unwrap()).unwrap())
+            .fetch_one(&admin_pool)
+            .await
+            .unwrap();
+    assert_eq!(recovered_expiry, None);
+    let mut managed_memory = request(
+        "POST",
+        "/v1/memories".to_owned(),
+        &a.token,
+        Some(json!({
+            "workspace_id":managed_workspace_id,
+            "project_id":null,
+            "scope":"workspace",
+            "scope_id":managed_workspace_id,
+            "kind":"fact",
+            "content":"Membership removal regression",
+            "source":{},
+            "expires_at":null
+        })),
+    );
+    managed_memory.headers_mut().insert(
+        "Idempotency-Key",
+        "managed-workspace-memory".parse().unwrap(),
+    );
+    let managed_memory = app.clone().oneshot(managed_memory).await.unwrap();
+    assert_eq!(managed_memory.status(), StatusCode::CREATED);
+    let managed_memory_id = response_json(managed_memory).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let managed_grant = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/grants".to_owned(),
+            &a.token,
+            Some(json!({
+                "subject_principal_id":service_id,
+                "workspace_id":managed_workspace_id,
+                "scope":"workspace",
+                "scope_id":managed_workspace_id,
+                "actions":["read","write","delete"],
+                "expires_at":null
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(managed_grant.status(), StatusCode::CREATED);
+    let managed_grant_id = response_json(managed_grant).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                format!("/v1/memories/{managed_memory_id}"),
+                rotated_service_token,
+                None,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
     assert_eq!(
         app.clone()
             .oneshot(request(
@@ -318,6 +639,106 @@ async fn tenant_isolation_grant_and_revocation_flow() {
             .unwrap()
             .status(),
         StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                format!("/v1/memories/{managed_memory_id}"),
+                rotated_service_token,
+                None,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let managed_grant_revoked: bool = sqlx::query_scalar(
+        "SELECT revoked_at IS NOT NULL FROM memshare.grants WHERE tenant_id=$1 AND id=$2",
+    )
+    .bind(a.tenant_id)
+    .bind(Uuid::parse_str(&managed_grant_id).unwrap())
+    .fetch_one(&admin_pool)
+    .await
+    .unwrap();
+    assert!(managed_grant_revoked);
+    let mut restore_stale_grant = admin_pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('memshare.tenant_id',$1,true),set_config('memshare.principal_id',$2,true)")
+        .bind(a.tenant_id.to_string())
+        .bind(a.principal_id.to_string())
+        .execute(&mut *restore_stale_grant)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memshare.grants SET revoked_at=NULL WHERE tenant_id=$1 AND id=$2")
+        .bind(a.tenant_id)
+        .bind(Uuid::parse_str(&managed_grant_id).unwrap())
+        .execute(&mut *restore_stale_grant)
+        .await
+        .unwrap();
+    restore_stale_grant.commit().await.unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                format!("/v1/memories/{managed_memory_id}"),
+                rotated_service_token,
+                None,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let stale_grant_list = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/memories?q=Membership&limit=100".to_owned(),
+            rotated_service_token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale_grant_list.status(), StatusCode::OK);
+    assert_eq!(response_json(stale_grant_list).await["items"], json!([]));
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "PATCH",
+                format!("/v1/memories/{managed_memory_id}"),
+                rotated_service_token,
+                Some(json!({"version":1,"content":"stale grant mutation"})),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let mut stale_grant_create = request(
+        "POST",
+        "/v1/memories".to_owned(),
+        rotated_service_token,
+        Some(json!({
+            "workspace_id":managed_workspace_id,
+            "project_id":null,
+            "scope":"workspace",
+            "scope_id":managed_workspace_id,
+            "kind":"fact",
+            "content":"stale grant create",
+            "source":{},
+            "expires_at":null
+        })),
+    );
+    stale_grant_create
+        .headers_mut()
+        .insert("Idempotency-Key", "stale-grant-create".parse().unwrap());
+    let stale_grant_create = app.clone().oneshot(stale_grant_create).await.unwrap();
+    let stale_grant_create_status = stale_grant_create.status();
+    let stale_grant_create_body = response_json(stale_grant_create).await;
+    assert_eq!(
+        stale_grant_create_status,
+        StatusCode::FORBIDDEN,
+        "unexpected response: {stale_grant_create_body}"
     );
     let project_membership_status: String = sqlx::query_scalar("SELECT status FROM memshare.project_memberships WHERE tenant_id=$1 AND workspace_id=$2 AND project_id=$3 AND principal_id=$4")
         .bind(a.tenant_id)
@@ -340,6 +761,26 @@ async fn tenant_isolation_grant_and_revocation_flow() {
         .unwrap();
     assert_eq!(disabled.status(), StatusCode::OK);
     assert_eq!(response_json(disabled).await["status"], "disabled");
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/v1/grants".to_owned(),
+                &a.token,
+                Some(json!({
+                    "subject_principal_id":service_id,
+                    "workspace_id":managed_workspace_id,
+                    "scope":"workspace",
+                    "scope_id":managed_workspace_id,
+                    "actions":["read"],
+                    "expires_at":null
+                })),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
     assert_eq!(
         app.clone()
             .oneshot(request(
@@ -414,7 +855,7 @@ async fn tenant_isolation_grant_and_revocation_flow() {
     assert_eq!(replay.status(), StatusCode::OK);
     assert_eq!(response_json(replay).await["id"], memory["id"]);
 
-    let mut collision_body = replay_body;
+    let mut collision_body = replay_body.clone();
     collision_body["content"] = json!("different content");
     let mut collision = request(
         "POST",
@@ -428,6 +869,36 @@ async fn tenant_isolation_grant_and_revocation_flow() {
     assert_eq!(
         app.clone().oneshot(collision).await.unwrap().status(),
         StatusCode::CONFLICT
+    );
+
+    let mut expire_memory_key = admin_pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('memshare.tenant_id',$1,true),set_config('memshare.principal_id',$2,true)")
+        .bind(a.tenant_id.to_string())
+        .bind(a.principal_id.to_string())
+        .execute(&mut *expire_memory_key)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memshare.idempotency SET expires_at=now()-interval '1 second' WHERE tenant_id=$1 AND principal_id=$2 AND operation='memory.create' AND key='tenant-a-memory'")
+        .bind(a.tenant_id)
+        .bind(a.principal_id)
+        .execute(&mut *expire_memory_key)
+        .await
+        .unwrap();
+    expire_memory_key.commit().await.unwrap();
+    let mut expired_memory_reuse = request(
+        "POST",
+        "/v1/memories".to_owned(),
+        &a.token,
+        Some(replay_body),
+    );
+    expired_memory_reuse
+        .headers_mut()
+        .insert("Idempotency-Key", "tenant-a-memory".parse().unwrap());
+    let expired_memory_reuse = app.clone().oneshot(expired_memory_reuse).await.unwrap();
+    assert_eq!(expired_memory_reuse.status(), StatusCode::CREATED);
+    assert_ne!(
+        response_json(expired_memory_reuse).await["id"],
+        memory["id"]
     );
 
     let updated = app
@@ -777,7 +1248,7 @@ async fn tenant_isolation_grant_and_revocation_flow() {
         "POST",
         "/v1/adapters/openai/handoffs".to_owned(),
         source_agent_token,
-        Some(openai_call),
+        Some(openai_call.clone()),
     );
     create_handoff
         .headers_mut()
@@ -950,6 +1421,33 @@ async fn tenant_isolation_grant_and_revocation_flow() {
     assert_eq!(source_result.status(), StatusCode::OK);
     assert_eq!(response_json(source_result).await["status"], "completed");
 
+    let mut expire_handoff_key = admin_pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('memshare.tenant_id',$1,true),set_config('memshare.principal_id',$2,true)")
+        .bind(a.tenant_id.to_string())
+        .bind(Uuid::parse_str(source_agent_id).unwrap().to_string())
+        .execute(&mut *expire_handoff_key)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memshare.idempotency SET expires_at=now()-interval '1 second' WHERE tenant_id=$1 AND principal_id=$2 AND operation='handoff.create' AND key='cross-llm-handoff'")
+        .bind(a.tenant_id)
+        .bind(Uuid::parse_str(source_agent_id).unwrap())
+        .execute(&mut *expire_handoff_key)
+        .await
+        .unwrap();
+    expire_handoff_key.commit().await.unwrap();
+    let mut expired_handoff_reuse = request(
+        "POST",
+        "/v1/adapters/openai/handoffs".to_owned(),
+        source_agent_token,
+        Some(openai_call),
+    );
+    expired_handoff_reuse
+        .headers_mut()
+        .insert("Idempotency-Key", "cross-llm-handoff".parse().unwrap());
+    let expired_handoff_reuse = app.clone().oneshot(expired_handoff_reuse).await.unwrap();
+    assert_eq!(expired_handoff_reuse.status(), StatusCode::CREATED);
+    assert_ne!(response_json(expired_handoff_reuse).await["id"], handoff_id);
+
     let anthropic_create = json!({
         "type":"tool_use",
         "name":"memshare_create_handoff",
@@ -1011,6 +1509,16 @@ async fn tenant_isolation_grant_and_revocation_flow() {
             .status(),
         StatusCode::NOT_FOUND
     );
+    let target_grants_active: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM memshare.grants WHERE tenant_id=$1 AND workspace_id=$2 AND scope='agent' AND scope_id=$3 AND revoked_at IS NULL",
+    )
+    .bind(a.tenant_id)
+    .bind(a.workspace_id)
+    .bind(Uuid::parse_str(target_agent_id).unwrap())
+    .fetch_one(&admin_pool)
+    .await
+    .unwrap();
+    assert_eq!(target_grants_active, 0);
 
     let credential_revoked = app
         .clone()
@@ -1077,6 +1585,10 @@ async fn tenant_isolation_grant_and_revocation_flow() {
         .execute(&control_pool)
         .await
         .expect("drop isolated test database");
+    sqlx::query(&format!("DROP ROLE {runtime_role}"))
+        .execute(&control_pool)
+        .await
+        .expect("drop isolated runtime role");
     control_pool.close().await;
 }
 use std::str::FromStr;

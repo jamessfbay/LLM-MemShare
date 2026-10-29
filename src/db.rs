@@ -164,7 +164,7 @@ pub async fn begin_tenant(
     let mut tx = pool.begin().await?;
     set_tenant_context_raw(&mut tx, principal.tenant_id, principal.principal_id).await?;
     let active: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM memshare.principals p JOIN memshare.tenants t ON t.id=p.tenant_id WHERE p.tenant_id=$1 AND p.id=$2 AND p.status='active' AND t.status='active')",
+        "SELECT EXISTS(SELECT 1 FROM memshare.principals p JOIN memshare.tenants t ON t.id=p.tenant_id LEFT JOIN memshare.principals owner ON owner.tenant_id=p.tenant_id AND owner.id=p.owner_principal_id WHERE p.tenant_id=$1 AND p.id=$2 AND p.status='active' AND t.status='active' AND (p.kind<>'agent' OR owner.status='active'))",
     )
     .bind(principal.tenant_id)
     .bind(principal.principal_id)
