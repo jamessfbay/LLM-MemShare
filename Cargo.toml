@@ -23,7 +23,7 @@ exclude = [
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["http1", "json", "tokio"] }
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 rand = "0.8"
