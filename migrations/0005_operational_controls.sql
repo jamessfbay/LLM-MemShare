@@ -1,4 +1,5 @@
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+ALTER EXTENSION pgcrypto SET SCHEMA public;
 
 ALTER TABLE memshare.audit_events
     ADD COLUMN credential_id uuid REFERENCES memshare.credentials(id),
