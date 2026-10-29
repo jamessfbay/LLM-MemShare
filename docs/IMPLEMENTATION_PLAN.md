@@ -1,6 +1,6 @@
 # Multi-tenant open-source middleware implementation plan
 
-Status: active implementation. Baseline: Rust 0.1.0 alpha on 2026-10-26. Target capabilities are future work unless explicitly identified as implemented. The current alpha is not a production multi-tenant security boundary.
+Status: active implementation. Baseline: Rust 0.1.1 alpha on 2026-10-28. Target capabilities are future work unless explicitly identified as implemented. The current alpha is not a production multi-tenant security boundary.
 
 The [Rust feasibility review](RUST_FEASIBILITY_REVIEW.md) accepts the target architecture with staged delivery and records the remaining production release blockers.
 
@@ -105,7 +105,7 @@ Exit: the two-tenant journey passes against PostgreSQL, including ID guessing, s
 
 ### M2 — Security and operational beta
 
-- [ ] Implement and test membership removal, ownership transfer, run-bound credentials, rate limits, retention, hard deletion and recovery. Provide structured audit and audit-reader access controls; document actual tamper resistance.
+- [ ] Complete and test multi-workspace offboarding, ownership transfer, run-bound credentials, rate limits, retention, hard deletion and recovery. Provide structured audit and audit-reader access controls; document actual tamper resistance.
 - [ ] Document TLS, least privilege, secrets, backup/restore, deletion replay, upgrades and incident response. Test connection-pool and background-operation isolation.
 - [ ] Expand matrix tests across operations and scopes, including concurrent revocation, expiration, crashes and restore. A reproducible authorization leak blocks release.
 - [ ] Obtain independent security review and remediate findings before claiming production tenant isolation. Budget and schedule review separately; a clearly labeled beta does not require that claim.

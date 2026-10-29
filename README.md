@@ -7,7 +7,7 @@ Permissioned memory and task handoffs for agents, across model providers.
 
 LLM-MemShare is open-source middleware written in Rust. Applications use one HTTP service to store shared context, control access, and pass versioned tasks between agents. A deployment can host multiple tenants; bearer credentials identify each tenant and principal, while PostgreSQL stores authorization and task state.
 
-**Status: 0.1.0 alpha.** The implemented API includes tenant administration, credentials, grants, memory CRUD, and leased agent handoffs. Production security review, recovery exercises, and remaining release gates are tracked in the [roadmap](docs/ROADMAP.md).
+**Status: 0.1.1 alpha.** The implemented API includes tenant administration, credentials, grants, memory CRUD, and leased agent handoffs. Production security review, recovery exercises, and remaining release gates are tracked in the [roadmap](docs/ROADMAP.md).
 
 ## Architecture at a glance
 

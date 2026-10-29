@@ -10,6 +10,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 - Credential rotation preserves the lifetime of currently valid credentials and still supports administrator recovery when no valid credential remains.
 - Expired memory and handoff idempotency keys can be reused without colliding with retained history.
+
+### For contributors
+
 - PostgreSQL integration tests remove their generated runtime role after a successful run.
 
 ### Security

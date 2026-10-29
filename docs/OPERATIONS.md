@@ -88,7 +88,7 @@ Record this operator action in your operational audit trail; direct SQL does not
 
 Disabling a principal revokes its active credentials and all grants it holds, issued, or protects as an agent-scoped target. Directly owned agents are disabled, their active credentials and related grants are revoked, and authentication also rejects an agent whose owner is inactive. Reactivating the owner does not reactivate dependent agents or restore old credentials and grants; an agent cannot be reactivated until its owner is active. A tenant administrator must deliberately reactivate each required principal, issue a replacement credential, and recreate required grants. Self-disable and administrator self-demotion are rejected.
 
-Removing a workspace membership also removes the principal's project memberships in that workspace and revokes grants the principal holds or issued there. Authorization rechecks workspace membership even if stale grant data exists. This operation does not globally disable the principal or its agents because they may belong to other workspaces.
+Removing a workspace membership also removes the principal's project memberships in that workspace and revokes grants the principal holds or issued there, plus grants that target the principal as an agent. Authorization rechecks workspace membership even if stale grant data exists. This operation does not globally disable the principal or its agents because they may belong to other workspaces.
 
 ## Security and remaining operational work
 

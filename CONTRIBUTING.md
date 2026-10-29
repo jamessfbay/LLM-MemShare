@@ -23,7 +23,7 @@ The test database must be isolated and the supplied role must be allowed to crea
 
 - Use named Rust modules, two-space Markdown list indentation where needed, and `cargo fmt` output.
 - Add positive and negative tests for every authorization change. Tenant-facing database relations require composite tenant constraints, RLS policies, and non-owner tests.
-- Migrations are immutable after release. During the unreleased 0.1.0 bootstrap phase, edits to the initial migration require a clean-install test.
+- Released migrations are immutable. Add a new numbered migration for schema or data changes, and cover both clean installation and upgrades from supported versions.
 - API changes must update `docs/API.md`, implementation status, migration/rollback notes, and the changelog.
 - Do not log credentials, memory content, or production data in tests and examples.
 - Keep commits focused and use Conventional Commits.

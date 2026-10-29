@@ -24,7 +24,7 @@ Errors use a JSON object with a stable machine-readable code and message. Valida
 | `PATCH /v1/tenant` | Tenant administrator user | Sets current tenant status; suspension blocks further HTTP authentication. Operator recovery is required to reactivate a suspended tenant. |
 | `POST /v1/workspaces` | Tenant administrator user | Creates a workspace and an administrator membership for the actor. |
 | `PUT /v1/workspaces/{workspace_id}/members/{principal_id}` | Workspace administrator | Adds, restores, or changes a workspace membership. |
-| `DELETE /v1/workspaces/{workspace_id}/members/{principal_id}` | Workspace administrator | Removes workspace/project memberships and revokes grants held or issued by that principal in the workspace; administrator self-removal is rejected. |
+| `DELETE /v1/workspaces/{workspace_id}/members/{principal_id}` | Workspace administrator | Removes workspace/project memberships and revokes grants held, issued, or targeted at that principal as an agent in the workspace; administrator self-removal is rejected. |
 | `POST /v1/workspaces/{workspace_id}/projects` | Workspace administrator | Creates a project and an administrator membership for the actor. |
 | `PUT /v1/workspaces/{workspace_id}/projects/{project_id}/members/{principal_id}` | Project administrator | Adds, restores, or changes a project membership. |
 | `DELETE /v1/workspaces/{workspace_id}/projects/{project_id}/members/{principal_id}` | Project administrator | Removes a project membership; administrator self-removal is rejected. |
