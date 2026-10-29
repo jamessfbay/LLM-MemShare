@@ -1114,7 +1114,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "rand 0.8.8",
