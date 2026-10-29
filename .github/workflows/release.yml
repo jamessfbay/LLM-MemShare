@@ -1,4 +1,4 @@
-name: release-artifacts
+name: release
 
 on:
   push:
@@ -9,23 +9,111 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: memshare
+          POSTGRES_PASSWORD: test-password
+          POSTGRES_DB: memshare_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U memshare -d memshare_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MEMSHARE_TEST_DATABASE_URL: postgresql://memshare:test-password@127.0.0.1:5432/memshare_test
+      MEMSHARE_TEST_HOST: 127.0.0.1
+      MEMSHARE_TEST_PORT: 5432
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66 # 1.89.0
+        with:
+          toolchain: 1.89.0
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: test "$GITHUB_SHA" = "$(git rev-parse origin/main)"
+      - run: cargo fmt -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-targets --all-features --locked
+      - run: bash scripts/verify-multi-process.sh
+      - run: cargo install cargo-audit --locked --version 0.22.2
+      - run: if cargo tree -i rsa 2>/dev/null | grep -q '^rsa '; then exit 1; fi
+      - run: cargo audit --ignore RUSTSEC-2023-0071
+
   build:
+    needs: verify
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: memshare-linux-x86_64
-          - os: macos-latest
-            artifact: memshare-macos
+            target: x86_64-unknown-linux-gnu
+          - os: macos-26
+            target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.89.0
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked
-      - run: cp target/release/llm-memshare ${{ matrix.artifact }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66 # 1.89.0
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          toolchain: 1.89.0
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Verify tag version
+        shell: bash
+        run: test "${GITHUB_REF_NAME#v}" = "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package binary
+        shell: bash
+        run: |
+          asset="llm-memshare-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/llm-memshare" "$asset"
+          tar -czf "$asset.tar.gz" "$asset"
+          shasum -a 256 "$asset.tar.gz" > "$asset.tar.gz.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: llm-memshare-${{ matrix.target }}
+          path: |
+            llm-memshare-*.tar.gz
+            llm-memshare-*.tar.gz.sha256
           if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66 # 1.89.0
+        with:
+          toolchain: 1.89.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate CycloneDX SBOM
+        run: |
+          cargo install cargo-cyclonedx --locked --version 0.5.9
+          cargo cyclonedx --format json --spec-version 1.5 --override-filename llm-memshare.cdx
+          mv llm-memshare.cdx.json dist/llm-memshare-${GITHUB_REF_NAME}.cdx.json
+      - name: Generate aggregate checksums
+        working-directory: dist
+        run: shasum -a 256 *.tar.gz *.cdx.json > SHA256SUMS
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.cdx.json
+            dist/SHA256SUMS
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
