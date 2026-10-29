@@ -1,71 +1,2230 @@
 {
-  "openapi": "3.1.0",
-  "info": {
-    "title": "LLM-MemShare API",
-    "version": "0.1.0",
-    "description": "Tenant-scoped memory and agent handoff middleware. The bearer token establishes the tenant and principal."
-  },
-  "servers": [{"url": "http://127.0.0.1:8080"}],
-  "security": [{"bearerAuth": []}],
-  "paths": {
-    "/health/live": {"get": {"security": [], "responses": {"200": {"description": "Live"}}}},
-    "/health/ready": {"get": {"security": [], "responses": {"200": {"description": "Ready"}}}},
-    "/v1/openapi.json": {"get": {"security": [], "responses": {"200": {"description": "This OpenAPI contract"}}}},
-    "/v1/tool-contracts/handoff": {"get": {"security": [], "responses": {"200": {"description": "Handoff tool schemas"}}}},
-    "/v1/principals": {"post": {"responses": {"201": {"description": "Principal and one-time credential created"}}}},
-    "/v1/principals/{principal_id}": {"patch": {"parameters": [{"$ref": "#/components/parameters/PrincipalId"}], "responses": {"200": {"description": "Principal status updated"}}}},
-    "/v1/principals/{principal_id}/credentials": {"post": {"parameters": [{"$ref": "#/components/parameters/PrincipalId"}], "responses": {"201": {"description": "Credential rotated"}}}},
-    "/v1/tenant": {"patch": {"responses": {"200": {"description": "Tenant status updated"}}}},
-    "/v1/workspaces": {"post": {"responses": {"201": {"description": "Workspace created"}}}},
-    "/v1/workspaces/{workspace_id}/members/{principal_id}": {
-      "put": {"parameters": [{"$ref": "#/components/parameters/WorkspaceId"},{"$ref": "#/components/parameters/PrincipalId"}], "responses": {"200": {"description": "Membership active"}}},
-      "delete": {"parameters": [{"$ref": "#/components/parameters/WorkspaceId"},{"$ref": "#/components/parameters/PrincipalId"}], "responses": {"200": {"description": "Membership removed"}}}
+    "openapi": "3.1.0",
+    "info": {
+        "title": "LLM-MemShare API",
+        "version": "0.2.0",
+        "description": "Multi-tenant memory and agent-handoff middleware. A bearer credential establishes the tenant and principal. Responses carry request IDs, and successful protected responses include rate-limit headers."
     },
-    "/v1/workspaces/{workspace_id}/projects": {"post": {"parameters": [{"$ref": "#/components/parameters/WorkspaceId"}], "responses": {"201": {"description": "Project created"}}}},
-    "/v1/workspaces/{workspace_id}/projects/{project_id}/members/{principal_id}": {
-      "put": {"parameters": [{"$ref": "#/components/parameters/WorkspaceId"},{"$ref": "#/components/parameters/ProjectId"},{"$ref": "#/components/parameters/PrincipalId"}], "responses": {"200": {"description": "Membership active"}}},
-      "delete": {"parameters": [{"$ref": "#/components/parameters/WorkspaceId"},{"$ref": "#/components/parameters/ProjectId"},{"$ref": "#/components/parameters/PrincipalId"}], "responses": {"200": {"description": "Membership removed"}}}
+    "servers": [
+        {
+            "url": "http://127.0.0.1:8080"
+        }
+    ],
+    "security": [
+        {
+            "bearerAuth": []
+        }
+    ],
+    "paths": {
+        "/health/live": {
+            "get": {
+                "operationId": "live",
+                "security": [],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Status"
+                    }
+                }
+            }
+        },
+        "/health/ready": {
+            "get": {
+                "operationId": "ready",
+                "security": [],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Status"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Error"
+                    }
+                }
+            }
+        },
+        "/metrics": {
+            "get": {
+                "operationId": "metrics",
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "Prometheus text exposition",
+                        "content": {
+                            "text/plain": {
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/openapi.json": {
+            "get": {
+                "operationId": "openApiContract",
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "OpenAPI 3.1 contract"
+                    }
+                }
+            }
+        },
+        "/v1/tool-contracts/handoff": {
+            "get": {
+                "operationId": "handoffToolContract",
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "Provider-neutral handoff tool schemas"
+                    }
+                }
+            }
+        },
+        "/.well-known/agent-card.json": {
+            "get": {
+                "operationId": "a2aAgentCard",
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "A2A v0.2.6 Agent Card"
+                    }
+                }
+            }
+        },
+        "/v1/principals": {
+            "post": {
+                "operationId": "createPrincipal",
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/CreatePrincipal"
+                },
+                "responses": {
+                    "201": {
+                        "$ref": "#/components/responses/IssuedCredential"
+                    },
+                    "429": {
+                        "$ref": "#/components/responses/Error"
+                    }
+                }
+            }
+        },
+        "/v1/principals/{principal_id}": {
+            "patch": {
+                "operationId": "updatePrincipal",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/PrincipalId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/UpdatePrincipal"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Principal updated",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Principal"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/Error"
+                    }
+                }
+            }
+        },
+        "/v1/principals/{principal_id}/credentials": {
+            "post": {
+                "operationId": "rotateCredential",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/PrincipalId"
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "$ref": "#/components/responses/IssuedCredential"
+                    }
+                }
+            }
+        },
+        "/v1/credentials/{credential_id}": {
+            "delete": {
+                "operationId": "revokeCredential",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/CredentialId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Status"
+                    }
+                }
+            }
+        },
+        "/v1/tenant": {
+            "patch": {
+                "operationId": "updateTenantStatus",
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/TenantStatus"
+                },
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Status"
+                    }
+                }
+            }
+        },
+        "/v1/tenant/limits": {
+            "get": {
+                "operationId": "getTenantLimits",
+                "responses": {
+                    "200": {
+                        "description": "Tenant quotas and request rate",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/TenantLimits"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "patch": {
+                "operationId": "updateTenantLimits",
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/TenantLimits"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Updated tenant limits",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/TenantLimits"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/admin/principals": {
+            "get": {
+                "operationId": "listPrincipals",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/Limit"
+                    },
+                    {
+                        "$ref": "#/components/parameters/Cursor"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/CursorPage"
+                    }
+                }
+            }
+        },
+        "/v1/admin/workspaces": {
+            "get": {
+                "operationId": "listWorkspaces",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/Limit"
+                    },
+                    {
+                        "$ref": "#/components/parameters/Cursor"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/CursorPage"
+                    }
+                }
+            }
+        },
+        "/v1/admin/grants": {
+            "get": {
+                "operationId": "listGrants",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/Limit"
+                    },
+                    {
+                        "$ref": "#/components/parameters/Cursor"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/CursorPage"
+                    }
+                }
+            }
+        },
+        "/v1/admin/credentials": {
+            "get": {
+                "operationId": "listCredentials",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/Limit"
+                    },
+                    {
+                        "$ref": "#/components/parameters/Cursor"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/CursorPage"
+                    }
+                }
+            }
+        },
+        "/v1/admin/audit-events": {
+            "get": {
+                "operationId": "listAuditEvents",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/Limit"
+                    },
+                    {
+                        "$ref": "#/components/parameters/Cursor"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/CursorPage"
+                    }
+                }
+            }
+        },
+        "/v1/admin/audit-events/verify": {
+            "get": {
+                "operationId": "verifyAuditChain",
+                "responses": {
+                    "200": {
+                        "description": "Audit chain verification",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": [
+                                        "event_count",
+                                        "valid",
+                                        "head_hash"
+                                    ],
+                                    "properties": {
+                                        "event_count": {
+                                            "type": "integer"
+                                        },
+                                        "valid": {
+                                            "type": "boolean"
+                                        },
+                                        "head_hash": {
+                                            "type": "string",
+                                            "minLength": 64,
+                                            "maxLength": 64
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/workspaces": {
+            "post": {
+                "operationId": "createWorkspace",
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/CreateWorkspace"
+                },
+                "responses": {
+                    "201": {
+                        "description": "Workspace created",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Workspace"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/workspaces/{workspace_id}/members/{principal_id}": {
+            "put": {
+                "operationId": "upsertWorkspaceMember",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/WorkspaceId"
+                    },
+                    {
+                        "$ref": "#/components/parameters/PrincipalId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/Membership"
+                },
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Status"
+                    }
+                }
+            },
+            "delete": {
+                "operationId": "removeWorkspaceMember",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/WorkspaceId"
+                    },
+                    {
+                        "$ref": "#/components/parameters/PrincipalId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Status"
+                    }
+                }
+            }
+        },
+        "/v1/workspaces/{workspace_id}/projects": {
+            "post": {
+                "operationId": "createProject",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/WorkspaceId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/CreateWorkspace"
+                },
+                "responses": {
+                    "201": {
+                        "description": "Project created",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Project"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/workspaces/{workspace_id}/projects/{project_id}/members/{principal_id}": {
+            "put": {
+                "operationId": "upsertProjectMember",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/WorkspaceId"
+                    },
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    },
+                    {
+                        "$ref": "#/components/parameters/PrincipalId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/Membership"
+                },
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Status"
+                    }
+                }
+            },
+            "delete": {
+                "operationId": "removeProjectMember",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/WorkspaceId"
+                    },
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    },
+                    {
+                        "$ref": "#/components/parameters/PrincipalId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Status"
+                    }
+                }
+            }
+        },
+        "/v1/agents": {
+            "post": {
+                "operationId": "createAgent",
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/CreateAgent"
+                },
+                "responses": {
+                    "201": {
+                        "$ref": "#/components/responses/IssuedCredential"
+                    },
+                    "429": {
+                        "$ref": "#/components/responses/Error"
+                    }
+                }
+            }
+        },
+        "/v1/grants": {
+            "post": {
+                "operationId": "createGrant",
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/CreateGrant"
+                },
+                "responses": {
+                    "201": {
+                        "description": "Grant created",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": [
+                                        "id"
+                                    ],
+                                    "properties": {
+                                        "id": {
+                                            "type": "string",
+                                            "format": "uuid"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/grants/{grant_id}": {
+            "delete": {
+                "operationId": "revokeGrant",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/GrantId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Status"
+                    }
+                }
+            }
+        },
+        "/v1/memories": {
+            "get": {
+                "operationId": "listMemories",
+                "parameters": [
+                    {
+                        "name": "q",
+                        "in": "query",
+                        "schema": {
+                            "type": "string",
+                            "maxLength": 500
+                        }
+                    },
+                    {
+                        "$ref": "#/components/parameters/Limit"
+                    },
+                    {
+                        "$ref": "#/components/parameters/Cursor"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Authorized memory page",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/MemoryPage"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "operationId": "createMemory",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/CreateMemory"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Idempotent replay",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Memory"
+                                }
+                            }
+                        }
+                    },
+                    "201": {
+                        "description": "Memory created",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Memory"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/Error"
+                    },
+                    "429": {
+                        "$ref": "#/components/responses/Error"
+                    }
+                }
+            }
+        },
+        "/v1/memories/{memory_id}": {
+            "get": {
+                "operationId": "getMemory",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/MemoryId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Memory",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Memory"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/Error"
+                    }
+                }
+            },
+            "patch": {
+                "operationId": "updateMemory",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/MemoryId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/UpdateMemory"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Updated memory",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Memory"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/Error"
+                    }
+                }
+            },
+            "delete": {
+                "operationId": "deleteMemory",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/MemoryId"
+                    },
+                    {
+                        "name": "version",
+                        "in": "query",
+                        "required": true,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Status"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/Error"
+                    }
+                }
+            }
+        },
+        "/v1/memories/{memory_id}/versions": {
+            "get": {
+                "operationId": "listMemoryVersions",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/MemoryId"
+                    },
+                    {
+                        "$ref": "#/components/parameters/Limit"
+                    },
+                    {
+                        "$ref": "#/components/parameters/Cursor"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/CursorPage"
+                    }
+                }
+            }
+        },
+        "/v1/handoffs": {
+            "get": {
+                "operationId": "listHandoffs",
+                "parameters": [
+                    {
+                        "name": "status",
+                        "in": "query",
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "queued",
+                                "claimed",
+                                "completed",
+                                "cancelled"
+                            ]
+                        }
+                    },
+                    {
+                        "name": "direction",
+                        "in": "query",
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "inbox",
+                                "outbox",
+                                "all"
+                            ],
+                            "default": "inbox"
+                        }
+                    },
+                    {
+                        "$ref": "#/components/parameters/Limit"
+                    },
+                    {
+                        "$ref": "#/components/parameters/Cursor"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Handoff page",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HandoffPage"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "operationId": "createHandoff",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/CreateHandoff"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Idempotent replay",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Handoff"
+                                }
+                            }
+                        }
+                    },
+                    "201": {
+                        "description": "Handoff created",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Handoff"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "$ref": "#/components/responses/Error"
+                    }
+                }
+            }
+        },
+        "/v1/handoffs/{handoff_id}": {
+            "get": {
+                "operationId": "getHandoff",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/HandoffId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Handoff",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Handoff"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/Error"
+                    }
+                }
+            }
+        },
+        "/v1/handoffs/{handoff_id}/claim": {
+            "post": {
+                "operationId": "claimHandoff",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/HandoffId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/ClaimHandoff"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Claimed handoff",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Handoff"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/Error"
+                    }
+                }
+            }
+        },
+        "/v1/handoffs/{handoff_id}/release": {
+            "post": {
+                "operationId": "releaseHandoff",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/HandoffId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/TransitionHandoff"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Requeued handoff",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Handoff"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/handoffs/{handoff_id}/complete": {
+            "post": {
+                "operationId": "completeHandoff",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/HandoffId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/CompleteHandoff"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Completed handoff",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Handoff"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/Error"
+                    }
+                }
+            }
+        },
+        "/v1/handoffs/{handoff_id}/cancel": {
+            "post": {
+                "operationId": "cancelHandoff",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/HandoffId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/TransitionHandoff"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Cancelled handoff",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Handoff"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/adapters/openai/handoffs": {
+            "post": {
+                "operationId": "createHandoffFromOpenAi",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/ProviderEnvelope"
+                },
+                "responses": {
+                    "201": {
+                        "description": "Handoff created",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Handoff"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/adapters/openai/handoffs/{handoff_id}/claim": {
+            "post": {
+                "operationId": "claimHandoffFromOpenAi",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/HandoffId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/ProviderEnvelope"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Claimed handoff"
+                    }
+                }
+            }
+        },
+        "/v1/adapters/openai/handoffs/{handoff_id}/complete": {
+            "post": {
+                "operationId": "completeHandoffFromOpenAi",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/HandoffId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/ProviderEnvelope"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Completed handoff"
+                    }
+                }
+            }
+        },
+        "/v1/adapters/anthropic/handoffs": {
+            "post": {
+                "operationId": "createHandoffFromAnthropic",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/ProviderEnvelope"
+                },
+                "responses": {
+                    "201": {
+                        "description": "Handoff created"
+                    }
+                }
+            }
+        },
+        "/v1/adapters/anthropic/handoffs/{handoff_id}/claim": {
+            "post": {
+                "operationId": "claimHandoffFromAnthropic",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/HandoffId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/ProviderEnvelope"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Claimed handoff"
+                    }
+                }
+            }
+        },
+        "/v1/adapters/anthropic/handoffs/{handoff_id}/complete": {
+            "post": {
+                "operationId": "completeHandoffFromAnthropic",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/HandoffId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/ProviderEnvelope"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Completed handoff"
+                    }
+                }
+            }
+        },
+        "/v1/mcp": {
+            "post": {
+                "operationId": "mcp",
+                "description": "MCP Streamable HTTP JSON-RPC endpoint for protocol version 2025-06-18. Supports initialize, ping, tools/list, and tools/call.",
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/JsonRpc"
+                },
+                "responses": {
+                    "200": {
+                        "description": "JSON-RPC response"
+                    },
+                    "204": {
+                        "description": "Notification accepted"
+                    }
+                }
+            }
+        },
+        "/v1/a2a": {
+            "post": {
+                "operationId": "a2a",
+                "description": "A2A v0.2.6 JSON-RPC subset supporting message/send and tasks/get with data parts.",
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/JsonRpc"
+                },
+                "responses": {
+                    "200": {
+                        "description": "JSON-RPC response"
+                    }
+                }
+            }
+        }
     },
-    "/v1/agents": {"post": {"responses": {"201": {"description": "Agent and one-time credential created"}}}},
-    "/v1/grants": {"post": {"responses": {"201": {"description": "Grant created"}}}},
-    "/v1/grants/{grant_id}": {"delete": {"parameters": [{"$ref": "#/components/parameters/GrantId"}], "responses": {"200": {"description": "Grant revoked"}}}},
-    "/v1/credentials/{credential_id}": {"delete": {"parameters": [{"$ref": "#/components/parameters/CredentialId"}], "responses": {"200": {"description": "Credential revoked"}}}},
-    "/v1/memories": {
-      "get": {"responses": {"200": {"description": "Authorized memories"}}},
-      "post": {"parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}], "responses": {"201": {"description": "Memory created"}}}
-    },
-    "/v1/memories/{memory_id}": {
-      "get": {"parameters": [{"$ref": "#/components/parameters/MemoryId"}], "responses": {"200": {"description": "Memory"}}},
-      "patch": {"parameters": [{"$ref": "#/components/parameters/MemoryId"}], "responses": {"200": {"description": "Memory updated"}}},
-      "delete": {"parameters": [{"$ref": "#/components/parameters/MemoryId"}], "responses": {"200": {"description": "Memory deleted"}}}
-    },
-    "/v1/handoffs": {
-      "get": {"responses": {"200": {"description": "Agent inbox or outbox"}}},
-      "post": {"parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}], "responses": {"201": {"description": "Handoff created"}}}
-    },
-    "/v1/handoffs/{handoff_id}": {"get": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Handoff"}}}},
-    "/v1/handoffs/{handoff_id}/claim": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Lease acquired"}}}},
-    "/v1/handoffs/{handoff_id}/release": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Handoff requeued"}}}},
-    "/v1/handoffs/{handoff_id}/complete": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Handoff completed"}}}},
-    "/v1/handoffs/{handoff_id}/cancel": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Handoff cancelled"}}}},
-    "/v1/adapters/openai/handoffs": {"post": {"parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}], "responses": {"201": {"description": "Handoff created from a function call"}}}},
-    "/v1/adapters/openai/handoffs/{handoff_id}/claim": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Lease acquired from a function call"}}}},
-    "/v1/adapters/openai/handoffs/{handoff_id}/complete": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Handoff completed from a function call"}}}},
-    "/v1/adapters/anthropic/handoffs": {"post": {"parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}], "responses": {"201": {"description": "Handoff created from a tool-use block"}}}},
-    "/v1/adapters/anthropic/handoffs/{handoff_id}/claim": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Lease acquired from a tool-use block"}}}},
-    "/v1/adapters/anthropic/handoffs/{handoff_id}/complete": {"post": {"parameters": [{"$ref": "#/components/parameters/HandoffId"}], "responses": {"200": {"description": "Handoff completed from a tool-use block"}}}}
-  },
-  "components": {
-    "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}},
-    "parameters": {
-      "IdempotencyKey": {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "maxLength": 200}},
-      "PrincipalId": {"name": "principal_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
-      "WorkspaceId": {"name": "workspace_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
-      "ProjectId": {"name": "project_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
-      "GrantId": {"name": "grant_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
-      "CredentialId": {"name": "credential_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
-      "MemoryId": {"name": "memory_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
-      "HandoffId": {"name": "handoff_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+    "components": {
+        "securitySchemes": {
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer"
+            }
+        },
+        "parameters": {
+            "IdempotencyKey": {
+                "name": "Idempotency-Key",
+                "in": "header",
+                "required": true,
+                "schema": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                }
+            },
+            "PrincipalId": {
+                "name": "principal_id",
+                "in": "path",
+                "required": true,
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            },
+            "WorkspaceId": {
+                "name": "workspace_id",
+                "in": "path",
+                "required": true,
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            },
+            "ProjectId": {
+                "name": "project_id",
+                "in": "path",
+                "required": true,
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            },
+            "GrantId": {
+                "name": "grant_id",
+                "in": "path",
+                "required": true,
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            },
+            "CredentialId": {
+                "name": "credential_id",
+                "in": "path",
+                "required": true,
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            },
+            "MemoryId": {
+                "name": "memory_id",
+                "in": "path",
+                "required": true,
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            },
+            "HandoffId": {
+                "name": "handoff_id",
+                "in": "path",
+                "required": true,
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            },
+            "Limit": {
+                "name": "limit",
+                "in": "query",
+                "schema": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 50
+                }
+            },
+            "Cursor": {
+                "name": "cursor",
+                "in": "query",
+                "schema": {
+                    "type": "string"
+                }
+            }
+        },
+        "requestBodies": {
+            "CreatePrincipal": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                                "kind",
+                                "name"
+                            ],
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                        "user",
+                                        "service"
+                                    ]
+                                },
+                                "name": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 200
+                                },
+                                "tenant_role": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ],
+                                    "enum": [
+                                        "admin",
+                                        "member",
+                                        null
+                                    ]
+                                },
+                                "expires_at": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ],
+                                    "format": "date-time"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "UpdatePrincipal": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "status": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ],
+                                    "enum": [
+                                        "active",
+                                        "disabled",
+                                        null
+                                    ]
+                                },
+                                "tenant_role": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ],
+                                    "enum": [
+                                        "admin",
+                                        "member",
+                                        null
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "TenantStatus": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                                "status"
+                            ],
+                            "properties": {
+                                "status": {
+                                    "type": "string",
+                                    "enum": [
+                                        "active",
+                                        "suspended"
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "TenantLimits": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "max_principals": {
+                                    "type": [
+                                        "integer",
+                                        "null"
+                                    ],
+                                    "minimum": 1
+                                },
+                                "max_memories": {
+                                    "type": [
+                                        "integer",
+                                        "null"
+                                    ],
+                                    "minimum": 1
+                                },
+                                "max_handoffs": {
+                                    "type": [
+                                        "integer",
+                                        "null"
+                                    ],
+                                    "minimum": 1
+                                },
+                                "requests_per_minute": {
+                                    "type": [
+                                        "integer",
+                                        "null"
+                                    ],
+                                    "minimum": 1
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "CreateWorkspace": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                                "slug"
+                            ],
+                            "properties": {
+                                "slug": {
+                                    "type": "string",
+                                    "pattern": "^[A-Za-z0-9._-]{1,100}$"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "Membership": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                                "role"
+                            ],
+                            "properties": {
+                                "role": {
+                                    "type": "string",
+                                    "enum": [
+                                        "admin",
+                                        "member"
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "CreateAgent": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                                "name",
+                                "workspace_id"
+                            ],
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 200
+                                },
+                                "workspace_id": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                },
+                                "expires_at": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ],
+                                    "format": "date-time"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "CreateGrant": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                                "subject_principal_id",
+                                "workspace_id",
+                                "scope",
+                                "scope_id",
+                                "actions"
+                            ],
+                            "properties": {
+                                "subject_principal_id": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                },
+                                "workspace_id": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                },
+                                "scope": {
+                                    "type": "string",
+                                    "enum": [
+                                        "private",
+                                        "workspace",
+                                        "project",
+                                        "agent"
+                                    ]
+                                },
+                                "scope_id": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                },
+                                "actions": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "uniqueItems": true,
+                                    "items": {
+                                        "type": "string",
+                                        "enum": [
+                                            "read",
+                                            "write",
+                                            "delete",
+                                            "review",
+                                            "handoff"
+                                        ]
+                                    }
+                                },
+                                "expires_at": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ],
+                                    "format": "date-time"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "CreateMemory": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/CreateMemory"
+                        }
+                    }
+                }
+            },
+            "UpdateMemory": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                                "version",
+                                "content"
+                            ],
+                            "properties": {
+                                "version": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 50000
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "CreateHandoff": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/CreateHandoff"
+                        }
+                    }
+                }
+            },
+            "ClaimHandoff": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                                "version"
+                            ],
+                            "properties": {
+                                "version": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                },
+                                "lease_seconds": {
+                                    "type": [
+                                        "integer",
+                                        "null"
+                                    ],
+                                    "minimum": 30,
+                                    "maximum": 3600
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "TransitionHandoff": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                                "version"
+                            ],
+                            "properties": {
+                                "version": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "CompleteHandoff": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/CompleteHandoff"
+                        }
+                    }
+                }
+            },
+            "ProviderEnvelope": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                }
+            },
+            "JsonRpc": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "jsonrpc",
+                                "method"
+                            ],
+                            "properties": {
+                                "jsonrpc": {
+                                    "const": "2.0"
+                                },
+                                "id": {},
+                                "method": {
+                                    "type": "string"
+                                },
+                                "params": {}
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "Status": {
+                "description": "Status response",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/Status"
+                        }
+                    }
+                }
+            },
+            "IssuedCredential": {
+                "description": "A credential token is returned once",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/IssuedCredential"
+                        }
+                    }
+                }
+            },
+            "CursorPage": {
+                "description": "Cursor page",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "items",
+                                "next_cursor"
+                            ],
+                            "properties": {
+                                "items": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object"
+                                    }
+                                },
+                                "next_cursor": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                },
+                "Error": {
+                    "description": "Error envelope",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/Error"
+                            }
+                        }
+                    }
+                }
+            },
+            "schemas": {
+                "Status": {
+                    "type": "object",
+                    "required": [
+                        "status"
+                    ],
+                    "properties": {
+                        "status": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "Error": {
+                    "type": "object",
+                    "required": [
+                        "error"
+                    ],
+                    "properties": {
+                        "error": {
+                            "type": "object",
+                            "required": [
+                                "code",
+                                "message"
+                            ],
+                            "properties": {
+                                "code": {
+                                    "type": "string"
+                                },
+                                "message": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                },
+                "IssuedCredential": {
+                    "type": "object",
+                    "required": [
+                        "principal_id",
+                        "credential_id",
+                        "token"
+                    ],
+                    "properties": {
+                        "principal_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "credential_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "token": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "Principal": {
+                    "type": "object",
+                    "required": [
+                        "id",
+                        "status",
+                        "tenant_role"
+                    ],
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "status": {
+                            "type": "string"
+                        },
+                        "tenant_role": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "Workspace": {
+                    "type": "object",
+                    "required": [
+                        "id",
+                        "slug"
+                    ],
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "slug": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "Project": {
+                    "type": "object",
+                    "required": [
+                        "id",
+                        "workspace_id",
+                        "slug"
+                    ],
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "workspace_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "slug": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "TenantLimits": {
+                    "type": "object",
+                    "required": [
+                        "max_principals",
+                        "max_memories",
+                        "max_handoffs",
+                        "requests_per_minute",
+                        "updated_at"
+                    ],
+                    "properties": {
+                        "max_principals": {
+                            "type": "integer"
+                        },
+                        "max_memories": {
+                            "type": "integer"
+                        },
+                        "max_handoffs": {
+                            "type": "integer"
+                        },
+                        "requests_per_minute": {
+                            "type": "integer"
+                        },
+                        "updated_at": {
+                            "type": "string",
+                            "format": "date-time"
+                        }
+                    }
+                },
+                "ModelIdentity": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "provider",
+                        "model"
+                    ],
+                    "properties": {
+                        "provider": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                        },
+                        "model": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                        },
+                        "framework": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "minLength": 1,
+                            "maxLength": 200
+                        }
+                    }
+                },
+                "CreateMemory": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "workspace_id",
+                        "scope",
+                        "scope_id",
+                        "kind",
+                "content"
+                    ],
+                    "properties": {
+                        "workspace_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "project_id": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "format": "uuid"
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": [
+                                "private",
+                                "workspace",
+                                "project",
+                                "agent"
+                            ]
+                        },
+                        "scope_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "preference",
+                                "fact",
+                                "experience",
+                                "task_state",
+                                "unverified"
+                            ]
+                        },
+                        "content": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 50000
+                        },
+                        "source": {
+                            "type": "object",
+                            "default": {}
+                        },
+                        "expires_at": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "format": "date-time"
+                        }
+                    }
+                },
+                "Memory": {
+                    "type": "object",
+                    "required": [
+                        "id",
+                        "workspace_id",
+                        "scope",
+                        "scope_id",
+                        "creator_principal_id",
+                        "kind",
+                        "content",
+                        "source",
+                        "version",
+                        "created_at",
+                        "updated_at"
+                    ],
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "workspace_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "project_id": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "format": "uuid"
+                        },
+                        "scope": {
+                            "type": "string"
+                        },
+                        "scope_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "owner_principal_id": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "format": "uuid"
+                        },
+                        "creator_principal_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "kind": {
+                            "type": "string"
+                        },
+                        "content": {
+                            "type": "string"
+                        },
+                        "source": {},
+                        "version": {
+                            "type": "integer"
+                        },
+                        "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                        },
+                        "updated_at": {
+                            "type": "string",
+                            "format": "date-time"
+                        }
+                    }
+                },
+                "MemoryPage": {
+                    "type": "object",
+                    "required": [
+                        "items",
+                        "next_cursor"
+                    ],
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/components/schemas/Memory"
+                            }
+                        },
+                        "next_cursor": {
+                            "type": [
+                                "string",
+                                "null"
+                            ]
+                        }
+                    }
+                },
+                "HandoffTask": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "protocol_version",
+                "summary"
+                    ],
+                    "properties": {
+                        "protocol_version": {
+                            "const": "1.0"
+                        },
+                        "summary": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2000
+                        },
+                        "instructions": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "maxLength": 20000
+                        },
+                        "data": {
+                            "type": "object"
+                        }
+                    }
+                },
+                "HandoffResult": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "protocol_version",
+                        "summary",
+                "outcome"
+                    ],
+                    "properties": {
+                        "protocol_version": {
+                            "const": "1.0"
+                        },
+                        "summary": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2000
+                        },
+                        "outcome": {
+                            "type": "string",
+                            "enum": [
+                                "succeeded",
+                                "failed"
+                            ]
+                        },
+                        "data": {
+                            "type": "object"
+                        }
+                    }
+                },
+                "CreateHandoff": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "workspace_id",
+                        "target_agent_id",
+                        "task",
+                "source"
+                    ],
+                    "properties": {
+                        "workspace_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "target_agent_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "task": {
+                            "$ref": "#/components/schemas/HandoffTask"
+                        },
+                        "input_memory_ids": {
+                            "type": "array",
+                            "maxItems": 100,
+                            "uniqueItems": true,
+                            "items": {
+                                "type": "string",
+                                "format": "uuid"
+                            }
+                        },
+                        "source": {
+                            "$ref": "#/components/schemas/ModelIdentity"
+                        },
+                        "expires_at": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "format": "date-time"
+                        }
+                    }
+                },
+                "CompleteHandoff": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "version",
+                        "result",
+                        "source"
+                    ],
+                    "properties": {
+                        "version": {
+                            "type": "integer",
+                            "minimum": 1
+                        },
+                        "result": {
+                            "$ref": "#/components/schemas/HandoffResult"
+                        },
+                        "result_memory_ids": {
+                            "type": "array",
+                            "maxItems": 100,
+                            "uniqueItems": true,
+                            "items": {
+                                "type": "string",
+                                "format": "uuid"
+                            }
+                        },
+                        "source": {
+                            "$ref": "#/components/schemas/ModelIdentity"
+                        }
+                    }
+                },
+                "Handoff": {
+                    "type": "object",
+                    "required": [
+                        "id",
+                        "workspace_id",
+                        "source_agent_id",
+                        "target_agent_id",
+                        "status",
+                        "task",
+                        "version",
+                        "created_at",
+                        "updated_at"
+                    ],
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "workspace_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "source_agent_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "target_agent_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": [
+                                "queued",
+                                "claimed",
+                                "completed",
+                                "cancelled"
+                            ]
+                        },
+                        "task": {},
+                        "input_memory_ids": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "format": "uuid"
+                            }
+                        },
+                        "omitted_input_references": {
+                            "type": "integer"
+                        },
+                        "result": {},
+                        "result_memory_ids": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "format": "uuid"
+                            }
+                        },
+                        "omitted_result_references": {
+                            "type": "integer"
+                        },
+                        "source_metadata": {},
+                        "result_metadata": {},
+                        "version": {
+                            "type": "integer"
+                        },
+                        "expires_at": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "format": "date-time"
+                        },
+                        "claimed_at": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "format": "date-time"
+                        },
+                        "lease_expires_at": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "format": "date-time"
+                        },
+                        "completed_at": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "format": "date-time"
+                        },
+                        "cancelled_at": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "format": "date-time"
+                        },
+                        "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                        },
+                        "updated_at": {
+                            "type": "string",
+                            "format": "date-time"
+                        }
+                    }
+                },
+                "HandoffPage": {
+                    "type": "object",
+                    "required": [
+                        "items",
+                        "next_cursor"
+                    ],
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/components/schemas/Handoff"
+                            }
+                        },
+                        "next_cursor": {
+                            "type": [
+                                "string",
+                                "null"
+                            ]
+                        }
+                    }
+                }
+            }
+        }
     }
-  }
 }

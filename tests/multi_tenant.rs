@@ -42,6 +42,11 @@ async fn fixture(pool: &PgPool, prefix: &str) -> Fixture {
         .execute(&mut *tx)
         .await
         .expect("insert tenant");
+    sqlx::query("INSERT INTO memshare.tenant_limits(tenant_id) VALUES ($1)")
+        .bind(tenant_id)
+        .execute(&mut *tx)
+        .await
+        .expect("insert tenant limits");
     sqlx::query("INSERT INTO memshare.principals(tenant_id,id,kind,name,status,tenant_role) VALUES ($1,$2,'user','owner','active','admin')")
         .bind(tenant_id).bind(principal_id).execute(&mut *tx).await.expect("insert principal");
     sqlx::query(
@@ -121,7 +126,7 @@ async fn runtime_pool(options: PgConnectOptions, admin: &PgPool) -> (PgPool, Str
     .await
     .expect("grant table DML");
     sqlx::query(&format!(
-        "GRANT EXECUTE ON FUNCTION memshare.authenticate_credential(text) TO {role}"
+        "GRANT EXECUTE ON FUNCTION memshare.authenticate_request(text) TO {role}"
     ))
     .execute(admin)
     .await
@@ -190,7 +195,7 @@ async fn tenant_isolation_grant_and_revocation_flow() {
     let (pool, runtime_role) = runtime_pool(test_options, &admin_pool).await;
     assert!(verify_runtime_role(&pool).await.is_ok());
     assert!(verify_runtime_role(&admin_pool).await.is_err());
-    let app = router(AppState { pool: pool.clone() });
+    let app = router(AppState::new(pool.clone()));
 
     let delegated_admin = app
         .clone()
@@ -338,6 +343,7 @@ async fn tenant_isolation_grant_and_revocation_flow() {
         tenant_id: a.tenant_id,
         principal_id: Uuid::parse_str(delegated_agent_id).unwrap(),
         kind: "agent".to_owned(),
+        request_id: "test-restored-agent".to_owned(),
     };
     assert!(begin_tenant(&pool, &restored_agent_context).await.is_err());
     assert_eq!(

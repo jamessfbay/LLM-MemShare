@@ -98,7 +98,11 @@ async fn main() -> anyhow::Result<()> {
             let bind = bind.unwrap_or(config.bind);
             let listener = tokio::net::TcpListener::bind(bind).await?;
             tracing::info!(%bind,"memshare listening");
-            axum::serve(listener, router(AppState { pool }))
+            let public_base_url = config
+                .public_base_url
+                .unwrap_or_else(|| format!("http://{bind}"));
+            let state = AppState::new(pool).with_public_base_url(public_base_url);
+            axum::serve(listener, router(state))
                 .with_graceful_shutdown(shutdown())
                 .await?;
         }

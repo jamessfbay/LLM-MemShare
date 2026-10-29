@@ -30,8 +30,9 @@ pub async fn migrate(pool: &PgPool) -> AppResult<()> {
 }
 
 pub async fn verify_runtime_role(pool: &PgPool) -> AppResult<()> {
-    let (role, superuser, bypass_rls, create_role, create_db, owns_tables): (
+    let (role, superuser, bypass_rls, create_role, create_db, owns_tables, can_authenticate): (
         String,
+        bool,
         bool,
         bool,
         bool,
@@ -49,7 +50,8 @@ SELECT current_user::text,
          FROM pg_class c
          JOIN pg_namespace n ON n.oid=c.relnamespace
          WHERE n.nspname='memshare' AND c.relkind IN ('r','p') AND c.relowner=r.oid
-       )
+       ),
+       COALESCE(has_function_privilege(current_user,to_regprocedure('memshare.authenticate_request(text)'),'EXECUTE'),false)
 FROM pg_roles r
 WHERE r.rolname=current_user
         "#,
@@ -59,6 +61,11 @@ WHERE r.rolname=current_user
     if superuser || bypass_rls || create_role || create_db || owns_tables {
         return Err(AppError::config(format!(
             "unsafe runtime database role {role}: serve requires a non-owner, NOSUPERUSER, NOBYPASSRLS, NOCREATEROLE, NOCREATEDB role"
+        )));
+    }
+    if !can_authenticate {
+        return Err(AppError::config(format!(
+            "runtime database role {role} cannot execute memshare.authenticate_request(text); apply migration 0005 and its runtime grant"
         )));
     }
     Ok(())
@@ -126,6 +133,10 @@ pub async fn provision_tenant(
         .bind(tenant_slug)
         .execute(&mut *tx)
         .await?;
+    sqlx::query("INSERT INTO memshare.tenant_limits(tenant_id) VALUES ($1)")
+        .bind(tenant_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("INSERT INTO memshare.principals(tenant_id,id,kind,name,status,tenant_role) VALUES ($1,$2,'user',$3,'active','admin')")
         .bind(tenant_id)
         .bind(principal_id)
@@ -174,6 +185,30 @@ pub async fn begin_tenant(
         return Err(AppError::unauthorized());
     }
     Ok(tx)
+}
+
+pub async fn record_request_audit(
+    pool: &PgPool,
+    principal: &PrincipalContext,
+    action: &str,
+    target_type: &str,
+    outcome: &str,
+) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+    set_tenant_context_raw(&mut tx, principal.tenant_id, principal.principal_id).await?;
+    sqlx::query("INSERT INTO memshare.audit_events(tenant_id,id,actor_principal_id,credential_id,action,outcome,target_type,request_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
+        .bind(principal.tenant_id)
+        .bind(Uuid::new_v4())
+        .bind(principal.principal_id)
+        .bind(principal.credential_id)
+        .bind(action)
+        .bind(outcome)
+        .bind(target_type)
+        .bind(&principal.request_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 async fn set_tenant_context_raw(

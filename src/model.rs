@@ -9,6 +9,7 @@ pub struct PrincipalContext {
     pub tenant_id: Uuid,
     pub principal_id: Uuid,
     pub kind: String,
+    pub request_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -19,7 +20,7 @@ pub struct CreateAgentRequest {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct IssuedCredential {
     pub principal_id: Uuid,
     pub credential_id: Uuid,
@@ -41,7 +42,7 @@ pub struct CreateWorkspaceRequest {
     pub slug: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct WorkspaceResponse {
     pub id: Uuid,
     pub slug: String,
@@ -53,7 +54,7 @@ pub struct CreateProjectRequest {
     pub slug: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ProjectResponse {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -73,7 +74,7 @@ pub struct UpdatePrincipalStatusRequest {
     pub tenant_role: Option<String>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Deserialize, Serialize, sqlx::FromRow)]
 pub struct PrincipalResponse {
     pub id: Uuid,
     pub status: String,
@@ -97,7 +98,7 @@ pub struct CreateGrantRequest {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct GrantResponse {
     pub id: Uuid,
 }
@@ -116,14 +117,14 @@ pub struct CreateMemoryRequest {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateMemoryRequest {
     pub version: i32,
     pub content: String,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Deserialize, Serialize, sqlx::FromRow)]
 pub struct MemoryResponse {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -145,9 +146,108 @@ pub struct ListResponse<T> {
     pub items: Vec<T>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CursorListResponse<T> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct MemoryVersionResponse {
+    pub version: i32,
+    pub content: String,
+    pub changed_by: Uuid,
+    pub changed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct PrincipalSummary {
+    pub id: Uuid,
+    pub kind: String,
+    pub name: String,
+    pub status: String,
+    pub tenant_role: String,
+    pub owner_principal_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct WorkspaceSummary {
+    pub id: Uuid,
+    pub slug: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct GrantSummary {
+    pub id: Uuid,
+    pub issuer_principal_id: Uuid,
+    pub subject_principal_id: Uuid,
+    pub workspace_id: Uuid,
+    pub scope: String,
+    pub scope_id: Uuid,
+    pub actions: Vec<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct CredentialSummary {
+    pub id: Uuid,
+    pub principal_id: Uuid,
+    pub status: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct AuditEventResponse {
+    pub id: Uuid,
+    pub actor_principal_id: Uuid,
+    pub credential_id: Option<Uuid>,
+    pub action: String,
+    pub outcome: String,
+    pub target_type: String,
+    pub target_id: Option<Uuid>,
+    pub request_id: Option<String>,
+    pub chain_position: i64,
+    pub previous_hash: String,
+    pub event_hash: String,
+    pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct AuditChainVerification {
+    pub event_count: i64,
+    pub valid: bool,
+    pub head_hash: String,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct TenantLimitsResponse {
+    pub max_principals: i64,
+    pub max_memories: i64,
+    pub max_handoffs: i64,
+    pub requests_per_minute: i64,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateTenantLimitsRequest {
+    pub max_principals: Option<i64>,
+    pub max_memories: Option<i64>,
+    pub max_handoffs: Option<i64>,
+    pub requests_per_minute: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct StatusResponse {
-    pub status: &'static str,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -190,14 +290,14 @@ pub struct CreateHandoffRequest {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimHandoffRequest {
     pub version: i32,
     pub lease_seconds: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransitionHandoffRequest {
     pub version: i32,
@@ -236,7 +336,7 @@ pub struct HandoffRecord {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct HandoffResponse {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -261,7 +361,7 @@ pub struct HandoffResponse {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct HandoffListResponse {
     pub items: Vec<HandoffResponse>,
     pub next_cursor: Option<String>,

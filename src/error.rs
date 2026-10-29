@@ -71,6 +71,22 @@ impl AppError {
         Self::new(StatusCode::CONFLICT, code, message)
     }
 
+    pub fn rate_limited() -> Self {
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "Request rate limit exceeded",
+        )
+    }
+
+    pub fn quota_exceeded(resource: &str) -> Self {
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "quota_exceeded",
+            format!("Tenant {resource} quota exceeded"),
+        )
+    }
+
     pub fn database(error: sqlx::Error) -> Self {
         tracing::error!(error = ?error, "database operation failed");
         Self::new(

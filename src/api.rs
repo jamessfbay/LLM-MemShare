@@ -25,18 +25,21 @@ use crate::{
         anthropic_claim, anthropic_complete, anthropic_create, openai_claim, openai_complete,
         openai_create, AnthropicToolUse, OpenAiFunctionCall, HANDOFF_TOOLS_V1,
     },
-    auth::{authenticate, AppState},
+    auth::{authenticate, observe, AppState},
     db::{begin_tenant, issue_token, token_hash},
     error::{AppError, AppResult},
     model::{
-        ClaimHandoffRequest, CompleteHandoffRequest, CreateAgentRequest, CreateGrantRequest,
-        CreateHandoffRequest, CreateMemoryRequest, CreatePrincipalRequest, CreateProjectRequest,
-        CreateWorkspaceRequest, GrantResponse, HandoffListResponse, HandoffRecord, HandoffResponse,
-        IssuedCredential, ListResponse, MemoryResponse, ModelIdentity, PrincipalContext,
-        PrincipalResponse, ProjectResponse, StatusResponse, TransitionHandoffRequest,
-        UpdateMemoryRequest, UpdatePrincipalStatusRequest, UpdateTenantStatusRequest,
-        UpsertMembershipRequest, WorkspaceResponse,
+        AuditChainVerification, AuditEventResponse, ClaimHandoffRequest, CompleteHandoffRequest,
+        CreateAgentRequest, CreateGrantRequest, CreateHandoffRequest, CreateMemoryRequest,
+        CreatePrincipalRequest, CreateProjectRequest, CreateWorkspaceRequest, CredentialSummary,
+        CursorListResponse, GrantResponse, GrantSummary, HandoffListResponse, HandoffRecord,
+        HandoffResponse, IssuedCredential, MemoryResponse, MemoryVersionResponse, ModelIdentity,
+        PrincipalContext, PrincipalResponse, PrincipalSummary, ProjectResponse, StatusResponse,
+        TenantLimitsResponse, TransitionHandoffRequest, UpdateMemoryRequest,
+        UpdatePrincipalStatusRequest, UpdateTenantLimitsRequest, UpdateTenantStatusRequest,
+        UpsertMembershipRequest, WorkspaceResponse, WorkspaceSummary,
     },
+    protocols::{a2a, a2a_agent_card, mcp},
 };
 
 struct ApiJson<T>(T);
@@ -106,6 +109,16 @@ pub fn router(state: AppState) -> Router {
             post(rotate_credential),
         )
         .route("/v1/tenant", axum::routing::patch(update_tenant_status))
+        .route(
+            "/v1/tenant/limits",
+            get(get_tenant_limits).patch(update_tenant_limits),
+        )
+        .route("/v1/admin/principals", get(list_principals))
+        .route("/v1/admin/workspaces", get(list_workspaces))
+        .route("/v1/admin/grants", get(list_grants))
+        .route("/v1/admin/credentials", get(list_credentials))
+        .route("/v1/admin/audit-events", get(list_audit_events))
+        .route("/v1/admin/audit-events/verify", get(verify_audit_chain))
         .route("/v1/workspaces", post(create_workspace))
         .route(
             "/v1/workspaces/{workspace_id}/members/{principal_id}",
@@ -127,6 +140,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/memories/{memory_id}",
             get(get_memory).patch(update_memory).delete(delete_memory),
+        )
+        .route(
+            "/v1/memories/{memory_id}/versions",
+            get(list_memory_versions),
         )
         .route("/v1/handoffs", post(create_handoff).get(list_handoffs))
         .route("/v1/handoffs/{handoff_id}", get(get_handoff))
@@ -158,17 +175,22 @@ pub fn router(state: AppState) -> Router {
             "/v1/adapters/anthropic/handoffs/{handoff_id}/complete",
             post(complete_handoff_from_anthropic),
         )
+        .route("/v1/mcp", post(mcp))
+        .route("/v1/a2a", post(a2a))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate));
 
     Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
+        .route("/metrics", get(metrics))
         .route("/v1/openapi.json", get(openapi_contract))
         .route("/v1/tool-contracts/handoff", get(handoff_tool_contract))
+        .route("/.well-known/agent-card.json", get(a2a_agent_card))
         .merge(protected)
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(middleware::from_fn_with_state(state.clone(), observe))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(route_not_found)
         .with_state(state)
@@ -187,19 +209,44 @@ async fn method_not_allowed() -> AppError {
 }
 
 async fn live() -> Json<StatusResponse> {
-    Json(StatusResponse { status: "ok" })
+    Json(StatusResponse {
+        status: "ok".to_owned(),
+    })
+}
+
+async fn metrics(State(state): State<AppState>) -> (HeaderMap, String) {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "text/plain; version=0.0.4; charset=utf-8"
+            .parse()
+            .expect("static content type"),
+    );
+    (headers, state.metrics.render())
 }
 
 async fn ready(State(state): State<AppState>) -> AppResult<Json<StatusResponse>> {
     let schema_ready: bool = sqlx::query_scalar(
-        "SELECT to_regclass('memshare.memories') IS NOT NULL AND to_regclass('memshare.handoffs') IS NOT NULL AND to_regprocedure('memshare.authenticate_credential(text)') IS NOT NULL",
+        r#"SELECT to_regclass('memshare.memories') IS NOT NULL
+               AND to_regclass('memshare.handoffs') IS NOT NULL
+               AND to_regclass('memshare.tenant_limits') IS NOT NULL
+               AND to_regclass('memshare.request_counters') IS NOT NULL
+               AND to_regclass('memshare.audit_chain_heads') IS NOT NULL
+               AND to_regprocedure('memshare.authenticate_request(text)') IS NOT NULL
+               AND COALESCE(has_function_privilege(current_user,to_regprocedure('memshare.authenticate_request(text)'),'EXECUTE'),false)"#,
     )
     .fetch_one(&state.pool)
     .await?;
     if !schema_ready {
-        return Err(AppError::config("database schema is not ready"));
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "not_ready",
+            "Database schema or runtime grants are not ready",
+        ));
     }
-    Ok(Json(StatusResponse { status: "ready" }))
+    Ok(Json(StatusResponse {
+        status: "ready".to_owned(),
+    }))
 }
 
 async fn handoff_tool_contract() -> AppResult<Json<serde_json::Value>> {
@@ -237,6 +284,11 @@ async fn create_principal(
     validate_future(body.expires_at)?;
     let mut tx = begin_tenant(&state.pool, &actor).await?;
     require_tenant_admin(&mut tx, &actor).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!("{}:principal-lifecycle", actor.tenant_id))
+        .execute(&mut *tx)
+        .await?;
+    enforce_quota(&mut tx, actor.tenant_id, "principals").await?;
     let principal_id = Uuid::new_v4();
     let credential_id = Uuid::new_v4();
     let token = issue_token();
@@ -304,6 +356,39 @@ async fn update_principal_status(
     }
     let mut tx = begin_tenant(&state.pool, &actor).await?;
     require_tenant_admin(&mut tx, &actor).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!("{}:principal-lifecycle", actor.tenant_id))
+        .execute(&mut *tx)
+        .await?;
+    let mut lifecycle_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM memshare.principals WHERE tenant_id=$1 AND (id=$2 OR owner_principal_id=$2)",
+    )
+    .bind(actor.tenant_id)
+    .bind(principal_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let owner_id: Option<Uuid> = sqlx::query_scalar::<_, Uuid>(
+        "SELECT owner_principal_id FROM memshare.principals WHERE tenant_id=$1 AND id=$2 AND kind='agent'",
+    )
+    .bind(actor.tenant_id)
+    .bind(principal_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(owner_id) = owner_id {
+        lifecycle_ids.push(owner_id);
+    }
+    lifecycle_ids.sort_unstable();
+    lifecycle_ids.dedup();
+    let locked_lifecycle_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM memshare.principals WHERE tenant_id=$1 AND id=ANY($2) ORDER BY id FOR UPDATE",
+    )
+    .bind(actor.tenant_id)
+    .bind(&lifecycle_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    if !locked_lifecycle_ids.contains(&principal_id) {
+        return Err(AppError::not_found());
+    }
     if body.tenant_role.as_deref() == Some("admin") {
         let is_user: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memshare.principals WHERE tenant_id=$1 AND id=$2 AND kind='user')")
             .bind(actor.tenant_id).bind(principal_id).fetch_one(&mut *tx).await?;
@@ -312,11 +397,14 @@ async fn update_principal_status(
         }
     }
     if body.status.as_deref() == Some("active") {
-        let owner_id: Option<Uuid> = sqlx::query_scalar::<_, Uuid>("SELECT owner_principal_id FROM memshare.principals WHERE tenant_id=$1 AND id=$2 AND kind='agent'")
-            .bind(actor.tenant_id).bind(principal_id).fetch_optional(&mut *tx).await?;
         if let Some(owner_id) = owner_id {
-            let owner_active: Option<bool> = sqlx::query_scalar("SELECT status='active' FROM memshare.principals WHERE tenant_id=$1 AND id=$2 FOR UPDATE")
-                .bind(actor.tenant_id).bind(owner_id).fetch_optional(&mut *tx).await?;
+            let owner_active: Option<bool> = sqlx::query_scalar(
+                "SELECT status='active' FROM memshare.principals WHERE tenant_id=$1 AND id=$2",
+            )
+            .bind(actor.tenant_id)
+            .bind(owner_id)
+            .fetch_optional(&mut *tx)
+            .await?;
             if owner_active != Some(true) {
                 return Err(AppError::invalid(
                     "an agent cannot be activated while its owner is inactive",
@@ -357,6 +445,10 @@ async fn rotate_credential(
     if actor.principal_id != principal_id {
         require_tenant_admin(&mut tx, &actor).await?;
     }
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!("{}:principal-lifecycle", actor.tenant_id))
+        .execute(&mut *tx)
+        .await?;
     let active: Option<bool> = sqlx::query_scalar(
         "SELECT status='active' FROM memshare.principals WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
     )
@@ -437,11 +529,266 @@ async fn update_tenant_status(
     tx.commit().await?;
     Ok(Json(StatusResponse {
         status: if body.status == "active" {
-            "active"
+            "active".to_owned()
         } else {
-            "suspended"
+            "suspended".to_owned()
         },
     }))
+}
+
+#[derive(Deserialize)]
+struct AdminListQuery {
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+fn admin_page(query: AdminListQuery) -> AppResult<(i64, Option<DateTime<Utc>>, Option<Uuid>)> {
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return Err(AppError::invalid("limit must be 1-100"));
+    }
+    let (cursor_time, cursor_id) = decode_handoff_cursor(query.cursor.as_deref())?;
+    Ok((limit, cursor_time, cursor_id))
+}
+
+async fn get_tenant_limits(
+    State(state): State<AppState>,
+    Extension(actor): Extension<PrincipalContext>,
+) -> AppResult<Json<TenantLimitsResponse>> {
+    let mut tx = begin_tenant(&state.pool, &actor).await?;
+    require_tenant_admin(&mut tx, &actor).await?;
+    let limits = sqlx::query_as::<_, TenantLimitsResponse>(
+        "SELECT max_principals,max_memories,max_handoffs,requests_per_minute,updated_at FROM memshare.tenant_limits WHERE tenant_id=$1",
+    )
+    .bind(actor.tenant_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Json(limits))
+}
+
+async fn update_tenant_limits(
+    State(state): State<AppState>,
+    Extension(actor): Extension<PrincipalContext>,
+    ApiJson(body): ApiJson<UpdateTenantLimitsRequest>,
+) -> AppResult<Json<TenantLimitsResponse>> {
+    if body.max_principals.is_none()
+        && body.max_memories.is_none()
+        && body.max_handoffs.is_none()
+        && body.requests_per_minute.is_none()
+    {
+        return Err(AppError::invalid("at least one limit is required"));
+    }
+    let valid = |value: Option<i64>, max: i64| value.is_none_or(|value| (1..=max).contains(&value));
+    if !valid(body.max_principals, 1_000_000)
+        || !valid(body.max_memories, 100_000_000)
+        || !valid(body.max_handoffs, 100_000_000)
+        || !valid(body.requests_per_minute, 10_000_000)
+    {
+        return Err(AppError::invalid(
+            "tenant limit is outside its supported range",
+        ));
+    }
+    let mut tx = begin_tenant(&state.pool, &actor).await?;
+    require_tenant_admin(&mut tx, &actor).await?;
+    let limits = sqlx::query_as::<_, TenantLimitsResponse>(
+        "UPDATE memshare.tenant_limits SET max_principals=COALESCE($1,max_principals),max_memories=COALESCE($2,max_memories),max_handoffs=COALESCE($3,max_handoffs),requests_per_minute=COALESCE($4,requests_per_minute),updated_at=clock_timestamp() WHERE tenant_id=$5 RETURNING max_principals,max_memories,max_handoffs,requests_per_minute,updated_at",
+    )
+    .bind(body.max_principals)
+    .bind(body.max_memories)
+    .bind(body.max_handoffs)
+    .bind(body.requests_per_minute)
+    .bind(actor.tenant_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    audit(
+        &mut tx,
+        &actor,
+        "tenant.limits_updated",
+        "tenant",
+        Some(actor.tenant_id),
+        "allowed",
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(limits))
+}
+
+async fn list_principals(
+    State(state): State<AppState>,
+    Extension(actor): Extension<PrincipalContext>,
+    ApiQuery(query): ApiQuery<AdminListQuery>,
+) -> AppResult<Json<CursorListResponse<PrincipalSummary>>> {
+    let (limit, cursor_time, cursor_id) = admin_page(query)?;
+    let mut tx = begin_tenant(&state.pool, &actor).await?;
+    require_tenant_admin(&mut tx, &actor).await?;
+    let mut items = sqlx::query_as::<_, PrincipalSummary>(
+        "SELECT id,kind,name,status,tenant_role,owner_principal_id,created_at FROM memshare.principals WHERE tenant_id=$1 AND ($2::timestamptz IS NULL OR (created_at,id)<($2,$3)) ORDER BY created_at DESC,id DESC LIMIT $4",
+    )
+    .bind(actor.tenant_id)
+    .bind(cursor_time)
+    .bind(cursor_id)
+    .bind(limit + 1)
+    .fetch_all(&mut *tx)
+    .await?;
+    let has_more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let next_cursor = has_more.then(|| {
+        let last = items.last().expect("non-empty page with more rows");
+        encode_handoff_cursor(last.created_at, last.id)
+    });
+    tx.commit().await?;
+    Ok(Json(CursorListResponse { items, next_cursor }))
+}
+
+async fn list_workspaces(
+    State(state): State<AppState>,
+    Extension(actor): Extension<PrincipalContext>,
+    ApiQuery(query): ApiQuery<AdminListQuery>,
+) -> AppResult<Json<CursorListResponse<WorkspaceSummary>>> {
+    let (limit, cursor_time, cursor_id) = admin_page(query)?;
+    let mut tx = begin_tenant(&state.pool, &actor).await?;
+    require_tenant_admin(&mut tx, &actor).await?;
+    let mut items = sqlx::query_as::<_, WorkspaceSummary>(
+        "SELECT id,slug,status,created_at FROM memshare.workspaces WHERE tenant_id=$1 AND ($2::timestamptz IS NULL OR (created_at,id)<($2,$3)) ORDER BY created_at DESC,id DESC LIMIT $4",
+    )
+    .bind(actor.tenant_id)
+    .bind(cursor_time)
+    .bind(cursor_id)
+    .bind(limit + 1)
+    .fetch_all(&mut *tx)
+    .await?;
+    let has_more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let next_cursor = has_more.then(|| {
+        let last = items.last().expect("non-empty page with more rows");
+        encode_handoff_cursor(last.created_at, last.id)
+    });
+    tx.commit().await?;
+    Ok(Json(CursorListResponse { items, next_cursor }))
+}
+
+async fn list_grants(
+    State(state): State<AppState>,
+    Extension(actor): Extension<PrincipalContext>,
+    ApiQuery(query): ApiQuery<AdminListQuery>,
+) -> AppResult<Json<CursorListResponse<GrantSummary>>> {
+    let (limit, cursor_time, cursor_id) = admin_page(query)?;
+    let mut tx = begin_tenant(&state.pool, &actor).await?;
+    require_tenant_admin(&mut tx, &actor).await?;
+    let mut items = sqlx::query_as::<_, GrantSummary>(
+        "SELECT id,issuer_principal_id,subject_principal_id,workspace_id,scope,scope_id,actions,expires_at,revoked_at,created_at FROM memshare.grants WHERE tenant_id=$1 AND ($2::timestamptz IS NULL OR (created_at,id)<($2,$3)) ORDER BY created_at DESC,id DESC LIMIT $4",
+    )
+    .bind(actor.tenant_id)
+    .bind(cursor_time)
+    .bind(cursor_id)
+    .bind(limit + 1)
+    .fetch_all(&mut *tx)
+    .await?;
+    let has_more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let next_cursor = has_more.then(|| {
+        let last = items.last().expect("non-empty page with more rows");
+        encode_handoff_cursor(last.created_at, last.id)
+    });
+    tx.commit().await?;
+    Ok(Json(CursorListResponse { items, next_cursor }))
+}
+
+async fn list_credentials(
+    State(state): State<AppState>,
+    Extension(actor): Extension<PrincipalContext>,
+    ApiQuery(query): ApiQuery<AdminListQuery>,
+) -> AppResult<Json<CursorListResponse<CredentialSummary>>> {
+    let (limit, cursor_time, cursor_id) = admin_page(query)?;
+    let mut tx = begin_tenant(&state.pool, &actor).await?;
+    require_tenant_admin(&mut tx, &actor).await?;
+    let mut items = sqlx::query_as::<_, CredentialSummary>(
+        "SELECT id,principal_id,status,expires_at,revoked_at,created_at,last_used_at FROM memshare.credentials WHERE tenant_id=$1 AND ($2::timestamptz IS NULL OR (created_at,id)<($2,$3)) ORDER BY created_at DESC,id DESC LIMIT $4",
+    )
+    .bind(actor.tenant_id)
+    .bind(cursor_time)
+    .bind(cursor_id)
+    .bind(limit + 1)
+    .fetch_all(&mut *tx)
+    .await?;
+    let has_more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let next_cursor = has_more.then(|| {
+        let last = items.last().expect("non-empty page with more rows");
+        encode_handoff_cursor(last.created_at, last.id)
+    });
+    tx.commit().await?;
+    Ok(Json(CursorListResponse { items, next_cursor }))
+}
+
+async fn list_audit_events(
+    State(state): State<AppState>,
+    Extension(actor): Extension<PrincipalContext>,
+    ApiQuery(query): ApiQuery<AdminListQuery>,
+) -> AppResult<Json<CursorListResponse<AuditEventResponse>>> {
+    let (limit, cursor_time, cursor_id) = admin_page(query)?;
+    let mut tx = begin_tenant(&state.pool, &actor).await?;
+    require_tenant_admin(&mut tx, &actor).await?;
+    let mut items = sqlx::query_as::<_, AuditEventResponse>(
+        "SELECT id,actor_principal_id,credential_id,action,outcome,target_type,target_id,request_id,chain_position,previous_hash,event_hash,occurred_at FROM memshare.audit_events WHERE tenant_id=$1 AND ($2::timestamptz IS NULL OR (occurred_at,id)<($2,$3)) ORDER BY occurred_at DESC,id DESC LIMIT $4",
+    )
+    .bind(actor.tenant_id)
+    .bind(cursor_time)
+    .bind(cursor_id)
+    .bind(limit + 1)
+    .fetch_all(&mut *tx)
+    .await?;
+    let has_more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let next_cursor = has_more.then(|| {
+        let last = items.last().expect("non-empty page with more rows");
+        encode_handoff_cursor(last.occurred_at, last.id)
+    });
+    tx.commit().await?;
+    Ok(Json(CursorListResponse { items, next_cursor }))
+}
+
+async fn verify_audit_chain(
+    State(state): State<AppState>,
+    Extension(actor): Extension<PrincipalContext>,
+) -> AppResult<Json<AuditChainVerification>> {
+    let mut tx = begin_tenant(&state.pool, &actor).await?;
+    require_tenant_admin(&mut tx, &actor).await?;
+    let verification = sqlx::query_as::<_, AuditChainVerification>(
+        r#"
+WITH ordered AS (
+    SELECT e.*,
+           lag(event_hash,1,repeat('0',64)) OVER (ORDER BY chain_position) AS expected_previous
+      FROM memshare.audit_events e
+     WHERE tenant_id=$1
+), validated AS (
+    SELECT count(*)::bigint AS event_count,
+           COALESCE(bool_and(
+               previous_hash=expected_previous
+               AND event_hash=encode(public.digest(convert_to(concat_ws('|',
+                   tenant_id::text,id::text,actor_principal_id::text,
+                   COALESCE(credential_id::text,''),action,outcome,target_type,
+                   COALESCE(target_id::text,''),COALESCE(request_id,''),chain_position::text,
+                   occurred_at::text,previous_hash
+               ),'UTF8'),'sha256'),'hex')
+           ),true) AS contents_valid,
+           (array_agg(event_hash ORDER BY chain_position DESC))[1] AS tail_hash
+      FROM ordered
+)
+SELECT event_count,
+       contents_valid AND COALESCE(head.last_hash,repeat('0',64))=COALESCE(tail_hash,repeat('0',64)) AS valid,
+       COALESCE(head.last_hash,repeat('0',64)) AS head_hash
+  FROM validated
+  LEFT JOIN memshare.audit_chain_heads head ON head.tenant_id=$1
+GROUP BY event_count,contents_valid,tail_hash,head.last_hash
+        "#,
+    )
+    .bind(actor.tenant_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Json(verification))
 }
 
 async fn create_workspace(
@@ -490,6 +837,10 @@ async fn upsert_workspace_membership(
 ) -> AppResult<Json<StatusResponse>> {
     validate_role(&body.role)?;
     let mut tx = begin_tenant(&state.pool, &actor).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!("{}:principal-lifecycle", actor.tenant_id))
+        .execute(&mut *tx)
+        .await?;
     require_workspace_role(
         &mut tx,
         actor.tenant_id,
@@ -516,7 +867,9 @@ async fn upsert_workspace_membership(
     )
     .await?;
     tx.commit().await?;
-    Ok(Json(StatusResponse { status: "active" }))
+    Ok(Json(StatusResponse {
+        status: "active".to_owned(),
+    }))
 }
 
 async fn remove_workspace_membership(
@@ -525,6 +878,10 @@ async fn remove_workspace_membership(
     ApiPath((workspace_id, principal_id)): ApiPath<(Uuid, Uuid)>,
 ) -> AppResult<Json<StatusResponse>> {
     let mut tx = begin_tenant(&state.pool, &actor).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!("{}:principal-lifecycle", actor.tenant_id))
+        .execute(&mut *tx)
+        .await?;
     require_workspace_role(
         &mut tx,
         actor.tenant_id,
@@ -557,7 +914,9 @@ async fn remove_workspace_membership(
     )
     .await?;
     tx.commit().await?;
-    Ok(Json(StatusResponse { status: "removed" }))
+    Ok(Json(StatusResponse {
+        status: "removed".to_owned(),
+    }))
 }
 
 async fn create_project(
@@ -640,7 +999,9 @@ async fn upsert_project_membership(
     )
     .await?;
     tx.commit().await?;
-    Ok(Json(StatusResponse { status: "active" }))
+    Ok(Json(StatusResponse {
+        status: "active".to_owned(),
+    }))
 }
 
 async fn remove_project_membership(
@@ -680,7 +1041,9 @@ async fn remove_project_membership(
     )
     .await?;
     tx.commit().await?;
-    Ok(Json(StatusResponse { status: "removed" }))
+    Ok(Json(StatusResponse {
+        status: "removed".to_owned(),
+    }))
 }
 
 async fn create_agent(
@@ -698,6 +1061,11 @@ async fn create_agent(
         return Err(AppError::invalid("expires_at must be in the future"));
     }
     let mut tx = begin_tenant(&state.pool, &principal).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!("{}:principal-lifecycle", principal.tenant_id))
+        .execute(&mut *tx)
+        .await?;
+    enforce_quota(&mut tx, principal.tenant_id, "principals").await?;
     require_active_principal(&mut tx, principal.tenant_id, principal.principal_id).await?;
     require_workspace_role(
         &mut tx,
@@ -761,6 +1129,10 @@ async fn create_grant(
         return Err(AppError::invalid("expires_at must be in the future"));
     }
     let mut tx = begin_tenant(&state.pool, &principal).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!("{}:principal-lifecycle", principal.tenant_id))
+        .execute(&mut *tx)
+        .await?;
     let mut participant_ids = if principal.principal_id == body.subject_principal_id {
         vec![principal.principal_id]
     } else {
@@ -771,67 +1143,48 @@ async fn create_grant(
     }
     participant_ids.sort_unstable();
     participant_ids.dedup();
-    let actor_active: Option<bool> = sqlx::query_scalar(
-        "SELECT status='active' FROM memshare.principals WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+    let membership_ids = participant_ids.clone();
+    let owner_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT owner_principal_id FROM memshare.principals WHERE tenant_id=$1 AND id=ANY($2) AND kind='agent' AND owner_principal_id IS NOT NULL ORDER BY owner_principal_id",
     )
     .bind(principal.tenant_id)
-    .bind(principal.principal_id)
-    .fetch_optional(&mut *tx)
+    .bind(&participant_ids)
+    .fetch_all(&mut *tx)
     .await?;
-    if actor_active != Some(true) {
-        return Err(AppError::forbidden());
-    }
-    let related_ids: Vec<Uuid> = participant_ids
-        .iter()
-        .copied()
-        .filter(|id| *id != principal.principal_id)
-        .collect();
+    participant_ids.extend(owner_ids);
+    participant_ids.sort_unstable();
+    participant_ids.dedup();
     let active_principals: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM memshare.principals WHERE tenant_id=$1 AND id=ANY($2) AND status='active' ORDER BY id FOR UPDATE",
     )
     .bind(principal.tenant_id)
-    .bind(&related_ids)
+    .bind(&participant_ids)
     .fetch_all(&mut *tx)
     .await?;
-    if body.subject_principal_id != principal.principal_id
-        && !active_principals.contains(&body.subject_principal_id)
-    {
-        return Err(AppError::not_found());
-    }
-    if body.scope == "agent"
-        && body.scope_id != principal.principal_id
-        && !active_principals.contains(&body.scope_id)
-    {
-        return Err(AppError::not_found());
-    }
-    let actor_is_member: Option<bool> = sqlx::query_scalar(
-        "SELECT status='active' FROM memshare.workspace_memberships WHERE tenant_id=$1 AND workspace_id=$2 AND principal_id=$3 FOR UPDATE",
-    )
-    .bind(principal.tenant_id)
-    .bind(body.workspace_id)
-    .bind(principal.principal_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if actor_is_member != Some(true) {
+    if !active_principals.contains(&principal.principal_id) {
         return Err(AppError::forbidden());
+    }
+    if !active_principals.contains(&body.subject_principal_id) {
+        return Err(AppError::not_found());
+    }
+    if body.scope == "agent" && !active_principals.contains(&body.scope_id) {
+        return Err(AppError::not_found());
     }
     let active_members: Vec<Uuid> = sqlx::query_scalar(
         "SELECT principal_id FROM memshare.workspace_memberships WHERE tenant_id=$1 AND workspace_id=$2 AND principal_id=ANY($3) AND status='active' ORDER BY principal_id FOR UPDATE",
     )
     .bind(principal.tenant_id)
     .bind(body.workspace_id)
-    .bind(&related_ids)
+    .bind(&membership_ids)
     .fetch_all(&mut *tx)
     .await?;
-    if body.subject_principal_id != principal.principal_id
-        && !active_members.contains(&body.subject_principal_id)
-    {
+    if !active_members.contains(&principal.principal_id) {
+        return Err(AppError::forbidden());
+    }
+    if !active_members.contains(&body.subject_principal_id) {
         return Err(AppError::not_found());
     }
-    if body.scope == "agent"
-        && body.scope_id != principal.principal_id
-        && !active_members.contains(&body.scope_id)
-    {
+    if body.scope == "agent" && !active_members.contains(&body.scope_id) {
         return Err(AppError::not_found());
     }
     authorize_grant_issuer(&mut tx, &principal, body.workspace_id, &body).await?;
@@ -879,7 +1232,9 @@ async fn revoke_grant(
     )
     .await?;
     tx.commit().await?;
-    Ok(Json(StatusResponse { status: "revoked" }))
+    Ok(Json(StatusResponse {
+        status: "revoked".to_owned(),
+    }))
 }
 
 async fn revoke_credential(
@@ -907,7 +1262,9 @@ async fn revoke_credential(
     )
     .await?;
     tx.commit().await?;
-    Ok(Json(StatusResponse { status: "revoked" }))
+    Ok(Json(StatusResponse {
+        status: "revoked".to_owned(),
+    }))
 }
 
 async fn create_memory(
@@ -939,6 +1296,7 @@ async fn create_memory(
         return Ok((StatusCode::OK,Json(memory)));
     }
     authorize_scope(&mut tx, &principal, &body, "write").await?;
+    enforce_quota(&mut tx, principal.tenant_id, "memories").await?;
     let id = Uuid::new_v4();
     let owner = match body.scope.as_str() {
         "private" | "agent" => Some(body.scope_id),
@@ -996,7 +1354,7 @@ async fn create_handoff_from_anthropic(
     create_handoff_inner(&state, &principal, &headers, body).await
 }
 
-async fn create_handoff_inner(
+pub(crate) async fn create_handoff_inner(
     state: &AppState,
     principal: &PrincipalContext,
     headers: &HeaderMap,
@@ -1074,6 +1432,7 @@ async fn create_handoff_inner(
         return Err(AppError::forbidden());
     }
     require_readable_memories(&mut tx, principal, &body.input_memory_ids).await?;
+    enforce_quota(&mut tx, principal.tenant_id, "handoffs").await?;
 
     let id = Uuid::new_v4();
     let source_metadata = verified_model_metadata(principal, &body.source);
@@ -1203,12 +1562,20 @@ async fn get_handoff(
     Extension(principal): Extension<PrincipalContext>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> AppResult<Json<HandoffResponse>> {
-    let mut tx = begin_tenant(&state.pool, &principal).await?;
-    let record = fetch_handoff(&mut tx, &principal, id).await?;
-    let response = render_handoff(&mut tx, &principal, record).await?;
+    Ok(Json(get_handoff_inner(&state, &principal, id).await?))
+}
+
+pub(crate) async fn get_handoff_inner(
+    state: &AppState,
+    principal: &PrincipalContext,
+    id: Uuid,
+) -> AppResult<HandoffResponse> {
+    let mut tx = begin_tenant(&state.pool, principal).await?;
+    let record = fetch_handoff(&mut tx, principal, id).await?;
+    let response = render_handoff(&mut tx, principal, record).await?;
     audit(
         &mut tx,
-        &principal,
+        principal,
         "handoff.read",
         "handoff",
         Some(id),
@@ -1216,7 +1583,7 @@ async fn get_handoff(
     )
     .await?;
     tx.commit().await?;
-    Ok(Json(response))
+    Ok(response)
 }
 
 async fn claim_handoff(
@@ -1246,7 +1613,7 @@ async fn claim_handoff_from_anthropic(
     claim_handoff_inner(&state, &principal, id, anthropic_claim(call)?).await
 }
 
-async fn claim_handoff_inner(
+pub(crate) async fn claim_handoff_inner(
     state: &AppState,
     principal: &PrincipalContext,
     id: Uuid,
@@ -1267,18 +1634,7 @@ async fn claim_handoff_inner(
     if record.target_agent_id != principal.principal_id {
         return Err(AppError::not_found());
     }
-    let claimable = record.status == "queued"
-        || (record.status == "claimed"
-            && record
-                .lease_expires_at
-                .is_some_and(|value| value <= Utc::now()));
-    if record.version != body.version || !claimable {
-        return Err(AppError::conflict(
-            "handoff_conflict",
-            "Handoff state or version has changed",
-        ));
-    }
-    let updated = sqlx::query("UPDATE memshare.handoffs SET status='claimed',claimed_at=now(),lease_expires_at=now()+make_interval(secs=>$5),version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 AND target_agent_id=$3 AND version=$4 AND (status='queued' OR (status='claimed' AND lease_expires_at<=now()))")
+    let updated = sqlx::query("UPDATE memshare.handoffs SET status='claimed',claimed_at=clock_timestamp(),lease_expires_at=clock_timestamp()+make_interval(secs=>$5),version=version+1,updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2 AND target_agent_id=$3 AND version=$4 AND (status='queued' OR (status='claimed' AND lease_expires_at<=clock_timestamp()))")
         .bind(principal.tenant_id)
         .bind(id)
         .bind(principal.principal_id)
@@ -1335,7 +1691,7 @@ async fn complete_handoff_from_anthropic(
     complete_handoff_inner(&state, &principal, id, body).await
 }
 
-async fn complete_handoff_inner(
+pub(crate) async fn complete_handoff_inner(
     state: &AppState,
     principal: &PrincipalContext,
     id: Uuid,
@@ -1350,20 +1706,9 @@ async fn complete_handoff_inner(
     if record.target_agent_id != principal.principal_id {
         return Err(AppError::not_found());
     }
-    if record.version != body.version
-        || record.status != "claimed"
-        || record
-            .lease_expires_at
-            .is_none_or(|value| value <= Utc::now())
-    {
-        return Err(AppError::conflict(
-            "handoff_conflict",
-            "Handoff state or version has changed",
-        ));
-    }
     require_readable_memories(&mut tx, principal, &body.result_memory_ids).await?;
     let result_metadata = verified_model_metadata(principal, &body.source);
-    let updated = sqlx::query("UPDATE memshare.handoffs SET status='completed',result=$1,result_memory_ids=$2,result_metadata=$3,completed_at=now(),version=version+1,updated_at=now() WHERE tenant_id=$4 AND id=$5 AND target_agent_id=$6 AND status='claimed' AND version=$7")
+    let updated = sqlx::query("UPDATE memshare.handoffs SET status='completed',result=$1,result_memory_ids=$2,result_metadata=$3,completed_at=clock_timestamp(),version=version+1,updated_at=clock_timestamp() WHERE tenant_id=$4 AND id=$5 AND target_agent_id=$6 AND status='claimed' AND version=$7 AND lease_expires_at>clock_timestamp()")
         .bind(serde_json::to_value(body.result).map_err(|_| AppError::invalid("result cannot be encoded"))?)
         .bind(body.result_memory_ids)
         .bind(result_metadata)
@@ -1493,7 +1838,7 @@ async fn fetch_handoff_for_update(
     principal: &PrincipalContext,
     id: Uuid,
 ) -> AppResult<HandoffRecord> {
-    sqlx::query_as::<_, HandoffRecord>(&format!("SELECT {} FROM memshare.handoffs h WHERE h.tenant_id=$1 AND h.id=$2 AND (h.source_agent_id=$3 OR h.target_agent_id=$3) AND (h.expires_at IS NULL OR h.expires_at>now()) AND EXISTS(SELECT 1 FROM memshare.workspace_memberships wm WHERE wm.tenant_id=h.tenant_id AND wm.workspace_id=h.workspace_id AND wm.principal_id=$3 AND wm.status='active') FOR UPDATE OF h", handoff_columns("h")))
+    sqlx::query_as::<_, HandoffRecord>(&format!("SELECT {} FROM memshare.handoffs h WHERE h.tenant_id=$1 AND h.id=$2 AND (h.source_agent_id=$3 OR h.target_agent_id=$3) AND (h.expires_at IS NULL OR h.expires_at>clock_timestamp()) AND EXISTS(SELECT 1 FROM memshare.workspace_memberships wm WHERE wm.tenant_id=h.tenant_id AND wm.workspace_id=h.workspace_id AND wm.principal_id=$3 AND wm.status='active') FOR UPDATE OF h", handoff_columns("h")))
         .bind(principal.tenant_id)
         .bind(id)
         .bind(principal.principal_id)
@@ -1738,13 +2083,14 @@ fn validate_handoff_protocol(value: &str, field: &str) -> AppResult<()> {
 struct ListQuery {
     q: Option<String>,
     limit: Option<i64>,
+    cursor: Option<String>,
 }
 
 async fn list_memories(
     State(state): State<AppState>,
     Extension(principal): Extension<PrincipalContext>,
     ApiQuery(query): ApiQuery<ListQuery>,
-) -> AppResult<Json<ListResponse<MemoryResponse>>> {
+) -> AppResult<Json<CursorListResponse<MemoryResponse>>> {
     let limit = query.limit.unwrap_or(50);
     if !(1..=100).contains(&limit) {
         return Err(AppError::invalid("limit must be 1-100"));
@@ -1753,17 +2099,26 @@ async fn list_memories(
     if q.len() > 500 {
         return Err(AppError::invalid("q must be at most 500 characters"));
     }
+    let (cursor_time, cursor_id) = decode_handoff_cursor(query.cursor.as_deref())?;
     let mut tx = begin_tenant(&state.pool, &principal).await?;
-    let items = sqlx::query_as::<_, MemoryResponse>(&format!(
-        "{} ORDER BY m.updated_at DESC,m.id LIMIT $4",
+    let mut items = sqlx::query_as::<_, MemoryResponse>(&format!(
+        "{} AND ($4::timestamptz IS NULL OR (m.updated_at,m.id)<($4,$5)) ORDER BY m.updated_at DESC,m.id DESC LIMIT $6",
         authorized_memory_select()
     ))
     .bind(principal.tenant_id)
     .bind(principal.principal_id)
     .bind(q)
-    .bind(limit)
+    .bind(cursor_time)
+    .bind(cursor_id)
+    .bind(limit + 1)
     .fetch_all(&mut *tx)
     .await?;
+    let has_more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let next_cursor = has_more.then(|| {
+        let last = items.last().expect("non-empty page with more rows");
+        encode_handoff_cursor(last.updated_at, last.id)
+    });
     audit(
         &mut tx,
         &principal,
@@ -1774,7 +2129,7 @@ async fn list_memories(
     )
     .await?;
     tx.commit().await?;
-    Ok(Json(ListResponse { items }))
+    Ok(Json(CursorListResponse { items, next_cursor }))
 }
 
 async fn get_memory(
@@ -1795,6 +2150,64 @@ async fn get_memory(
     .await?;
     tx.commit().await?;
     Ok(Json(value))
+}
+
+#[derive(Deserialize)]
+struct MemoryHistoryQuery {
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+async fn list_memory_versions(
+    State(state): State<AppState>,
+    Extension(principal): Extension<PrincipalContext>,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiQuery(query): ApiQuery<MemoryHistoryQuery>,
+) -> AppResult<Json<CursorListResponse<MemoryVersionResponse>>> {
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return Err(AppError::invalid("limit must be 1-100"));
+    }
+    let before_version = query
+        .cursor
+        .as_deref()
+        .map(str::parse::<i32>)
+        .transpose()
+        .map_err(|_| AppError::invalid("invalid cursor"))?;
+    if before_version.is_some_and(|value| value < 1) {
+        return Err(AppError::invalid("invalid cursor"));
+    }
+    let mut tx = begin_tenant(&state.pool, &principal).await?;
+    fetch_authorized_memory(&mut tx, &principal, id, "read").await?;
+    let mut items = sqlx::query_as::<_, MemoryVersionResponse>(
+        "SELECT version,content,changed_by,changed_at FROM memshare.memory_versions WHERE tenant_id=$1 AND memory_id=$2 AND ($3::integer IS NULL OR version<$3) ORDER BY version DESC LIMIT $4",
+    )
+    .bind(principal.tenant_id)
+    .bind(id)
+    .bind(before_version)
+    .bind(limit + 1)
+    .fetch_all(&mut *tx)
+    .await?;
+    let has_more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let next_cursor = has_more.then(|| {
+        items
+            .last()
+            .expect("non-empty page with more rows")
+            .version
+            .to_string()
+    });
+    audit(
+        &mut tx,
+        &principal,
+        "memory.versions_listed",
+        "memory",
+        Some(id),
+        "allowed",
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(CursorListResponse { items, next_cursor }))
 }
 
 async fn update_memory(
@@ -1876,7 +2289,9 @@ async fn delete_memory(
     )
     .await?;
     tx.commit().await?;
-    Ok(Json(StatusResponse { status: "deleted" }))
+    Ok(Json(StatusResponse {
+        status: "deleted".to_owned(),
+    }))
 }
 
 fn authorized_memory_select() -> &'static str {
@@ -2125,8 +2540,67 @@ async fn audit(
     target_id: Option<Uuid>,
     outcome: &str,
 ) -> AppResult<()> {
-    sqlx::query("INSERT INTO memshare.audit_events(tenant_id,id,actor_principal_id,action,outcome,target_type,target_id) VALUES ($1,$2,$3,$4,$5,$6,$7)").bind(p.tenant_id).bind(Uuid::new_v4()).bind(p.principal_id).bind(action).bind(outcome).bind(target_type).bind(target_id).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO memshare.audit_events(tenant_id,id,actor_principal_id,credential_id,action,outcome,target_type,target_id,request_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)").bind(p.tenant_id).bind(Uuid::new_v4()).bind(p.principal_id).bind(p.credential_id).bind(action).bind(outcome).bind(target_type).bind(target_id).bind(&p.request_id).execute(&mut **tx).await?;
     Ok(())
+}
+
+async fn enforce_quota(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    resource: &str,
+) -> AppResult<()> {
+    let limit: i64 =
+        match resource {
+            "principals" => sqlx::query_scalar(
+                "SELECT max_principals FROM memshare.tenant_limits WHERE tenant_id=$1 FOR UPDATE",
+            )
+            .bind(tenant_id)
+            .fetch_one(&mut **tx)
+            .await?,
+            "memories" => {
+                sqlx::query_scalar(
+                    "SELECT max_memories FROM memshare.tenant_limits WHERE tenant_id=$1 FOR UPDATE",
+                )
+                .bind(tenant_id)
+                .fetch_one(&mut **tx)
+                .await?
+            }
+            "handoffs" => {
+                sqlx::query_scalar(
+                    "SELECT max_handoffs FROM memshare.tenant_limits WHERE tenant_id=$1 FOR UPDATE",
+                )
+                .bind(tenant_id)
+                .fetch_one(&mut **tx)
+                .await?
+            }
+            _ => return Err(AppError::config("unknown quota resource")),
+        };
+    let count: i64 = match resource {
+        "principals" => sqlx::query_scalar(
+            "SELECT count(*) FROM memshare.principals WHERE tenant_id=$1",
+        )
+        .bind(tenant_id)
+        .fetch_one(&mut **tx)
+        .await?,
+        "memories" => sqlx::query_scalar(
+            "SELECT count(*) FROM memshare.memories WHERE tenant_id=$1 AND deleted_at IS NULL",
+        )
+        .bind(tenant_id)
+        .fetch_one(&mut **tx)
+        .await?,
+        "handoffs" => sqlx::query_scalar(
+            "SELECT count(*) FROM memshare.handoffs WHERE tenant_id=$1 AND status IN ('queued','claimed')",
+        )
+        .bind(tenant_id)
+        .fetch_one(&mut **tx)
+        .await?,
+        _ => unreachable!("resource validated above"),
+    };
+    if count >= limit {
+        Err(AppError::quota_exceeded(resource))
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_actions(actions: &[String]) -> AppResult<()> {
@@ -2208,5 +2682,23 @@ mod tests {
         assert_eq!(decoded_timestamp.unwrap(), timestamp);
         assert_eq!(decoded_id, Some(id));
         assert!(decode_handoff_cursor(Some("not-a-cursor")).is_err());
+    }
+
+    #[test]
+    fn openapi_contract_is_current_and_covers_operational_routes() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../contracts/openapi-v1.json")).unwrap();
+        assert_eq!(contract["info"]["version"], env!("CARGO_PKG_VERSION"));
+        for path in [
+            "/metrics",
+            "/v1/tenant/limits",
+            "/v1/admin/audit-events",
+            "/v1/memories/{memory_id}/versions",
+            "/v1/mcp",
+            "/v1/a2a",
+            "/.well-known/agent-card.json",
+        ] {
+            assert!(contract["paths"].get(path).is_some(), "missing {path}");
+        }
     }
 }

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
@@ -11,7 +11,7 @@ pub const CLAIM_HANDOFF_TOOL: &str = "memshare_claim_handoff";
 pub const COMPLETE_HANDOFF_TOOL: &str = "memshare_complete_handoff";
 pub const HANDOFF_TOOLS_V1: &str = include_str!("../contracts/handoff-tools-v1.json");
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenAiFunctionCall {
     #[serde(rename = "type")]
@@ -23,7 +23,7 @@ pub struct OpenAiFunctionCall {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnthropicToolUse {
     #[serde(rename = "type")]
