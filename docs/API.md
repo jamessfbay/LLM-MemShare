@@ -19,17 +19,17 @@ Errors use a JSON object with a stable machine-readable code and message. Valida
 | `GET /v1/tool-contracts/handoff` | Public | Returns the embedded handoff tool contract version 1.0. |
 | `GET /v1/openapi.json` | Public | Returns the embedded OpenAPI 3.1 contract. |
 | `POST /v1/principals` | Tenant administrator user | Creates an additional user or service, optionally creates a user as tenant administrator, and returns its credential once. |
-| `PATCH /v1/principals/{principal_id}` | Tenant administrator user | Changes status and/or tenant role; self-disable and self-demotion are rejected. Disabling permanently revokes active credentials. |
-| `POST /v1/principals/{principal_id}/credentials` | Principal or tenant administrator | Revokes active credentials and returns one replacement credential. |
+| `PATCH /v1/principals/{principal_id}` | Tenant administrator user | Changes status and/or tenant role; self-disable and self-demotion are rejected. Disabling permanently revokes active credentials and related grants, and disables directly owned agents. An agent cannot be activated while its owner is inactive. |
+| `POST /v1/principals/{principal_id}/credentials` | Principal or tenant administrator | Revokes active credentials and returns one replacement credential while preserving the active credential lifetime. |
 | `PATCH /v1/tenant` | Tenant administrator user | Sets current tenant status; suspension blocks further HTTP authentication. Operator recovery is required to reactivate a suspended tenant. |
 | `POST /v1/workspaces` | Tenant administrator user | Creates a workspace and an administrator membership for the actor. |
 | `PUT /v1/workspaces/{workspace_id}/members/{principal_id}` | Workspace administrator | Adds, restores, or changes a workspace membership. |
-| `DELETE /v1/workspaces/{workspace_id}/members/{principal_id}` | Workspace administrator | Removes a membership; administrator self-removal is rejected. |
+| `DELETE /v1/workspaces/{workspace_id}/members/{principal_id}` | Workspace administrator | Removes workspace/project memberships and revokes grants held or issued by that principal in the workspace; administrator self-removal is rejected. |
 | `POST /v1/workspaces/{workspace_id}/projects` | Workspace administrator | Creates a project and an administrator membership for the actor. |
 | `PUT /v1/workspaces/{workspace_id}/projects/{project_id}/members/{principal_id}` | Project administrator | Adds, restores, or changes a project membership. |
 | `DELETE /v1/workspaces/{workspace_id}/projects/{project_id}/members/{principal_id}` | Project administrator | Removes a project membership; administrator self-removal is rejected. |
 | `POST /v1/agents` | Workspace administrator user | Creates a tenant-scoped agent and returns its credential once. |
-| `POST /v1/grants` | User with authority over the requested scope | Creates a grant for an active subject in the specified workspace. |
+| `POST /v1/grants` | User with authority over the requested scope | Creates a grant when issuer, subject, and any agent-scope target are active members of the specified workspace. |
 | `DELETE /v1/grants/{grant_id}` | Grant issuer | Revokes the grant. |
 | `DELETE /v1/credentials/{credential_id}` | Owner of the agent principal | Revokes the credential. |
 | `POST /v1/memories` | Authorized principal | Creates a memory; requires `Idempotency-Key`. |
@@ -103,7 +103,7 @@ Create a memory:
 
 Supported scopes are `private`, `workspace`, `project`, and `agent`. Supported kinds are `preference`, `fact`, `experience`, `task_state`, and `unverified`. Content is limited to 50,000 bytes and client source metadata to 16 KiB. The server wraps client source data with verified actor provenance.
 
-Create idempotency keys are scoped to tenant, principal, and operation for 24 hours. Repeating the same key and canonical request returns the current authorized result; using the key with different input returns 409. Updates and deletions use optimistic versions and row locks to serialize concurrent writers.
+Create idempotency keys are scoped to tenant, principal, and operation for 24 hours. Repeating the same live key and canonical request returns the current authorized result; using a live key with different input returns 409. An expired key can be reused and produces a new resource. Updates and deletions use optimistic versions and row locks to serialize concurrent writers.
 
 ## Handoff contract
 

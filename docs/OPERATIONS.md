@@ -44,7 +44,7 @@ Runtime startup checks superuser, RLS bypass, role/database creation, and table 
 5. Ensure new tables/functions have the intended runtime grants.
 6. Start the new API binary using the runtime role and verify readiness and authenticated reads.
 
-The current migrations create the tenant schema, handoffs, and leased handoff states. Migration `0003_handoff_leases.sql` adds constraints requiring leases on claimed/completed records; deployments with pre-existing claimed/completed handoffs from `0002` require an operator-reviewed data backfill before applying it. A migration failure is not a completed upgrade. Do not edit SQLx migration history to bypass a mismatch.
+The current migrations create the tenant schema, handoffs, leased handoff states, and lifecycle enforcement. Migration `0003_handoff_leases.sql` adds constraints requiring leases on claimed/completed records; deployments with pre-existing claimed/completed handoffs from `0002` require an operator-reviewed data backfill before applying it. Migration `0004_principal_lifecycle.sql` disables agents with inactive owners, revokes affected credentials and stale grants, and strengthens authentication. Review its revocation impact before upgrading an existing installation. A migration failure is not a completed upgrade. Do not edit SQLx migration history to bypass a mismatch.
 
 There is no automatic down-migration or compatibility guarantee during alpha. After accepting new writes, restoring an old database backup can lose data. Plan a forward repair or a tested reconciliation path instead. Legacy prototype imports are not implemented.
 
@@ -86,7 +86,9 @@ COMMIT;
 
 Record this operator action in your operational audit trail; direct SQL does not append an application audit event. Confirm that the update affected the intended tenant.
 
-Disabling a principal revokes its active credentials. Reactivating that principal does not restore the old tokens; a tenant administrator must issue a replacement through credential rotation. Self-disable and administrator self-demotion are rejected. Disabling an agent's owner does not yet cascade to that owner's agents; revoke or disable those agents explicitly.
+Disabling a principal revokes its active credentials and all grants it holds, issued, or protects as an agent-scoped target. Directly owned agents are disabled, their active credentials and related grants are revoked, and authentication also rejects an agent whose owner is inactive. Reactivating the owner does not reactivate dependent agents or restore old credentials and grants; an agent cannot be reactivated until its owner is active. A tenant administrator must deliberately reactivate each required principal, issue a replacement credential, and recreate required grants. Self-disable and administrator self-demotion are rejected.
+
+Removing a workspace membership also removes the principal's project memberships in that workspace and revokes grants the principal holds or issued there. Authorization rechecks workspace membership even if stale grant data exists. This operation does not globally disable the principal or its agents because they may belong to other workspaces.
 
 ## Security and remaining operational work
 

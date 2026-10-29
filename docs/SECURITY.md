@@ -4,7 +4,7 @@ LLM-MemShare is a security-sensitive alpha. It has implemented isolation control
 
 ## Identity and tenancy
 
-Bearer credentials are random 256-bit values. PostgreSQL stores SHA-256 digests, and generated tokens are returned once at issuance. Credentials can expire, be revoked, or be rotated. Disabling a principal revokes its active credentials. A suspended tenant cannot authenticate.
+Bearer credentials are random 256-bit values. PostgreSQL stores SHA-256 digests, and generated tokens are returned once at issuance. Credentials can expire, be revoked, or be rotated. Rotation preserves the lifetime of the active credential set, so a temporary credential cannot make itself permanent. Disabling a principal revokes its active credentials and grants and disables directly owned agents. A suspended tenant cannot authenticate.
 
 Authentication resolves the principal and tenant through a fixed, schema-qualified `SECURITY DEFINER` function with a fixed safe search path. Client tenant/actor headers do not establish authority. Protected handlers enter a transaction, set transaction-local tenant/principal context, recheck active identity, and apply operation authorization.
 
@@ -18,7 +18,7 @@ Private content is owner-scoped unless explicitly granted. Workspace/project rol
 
 Handoff creation requires a directional grant and two active workspace agents. Reads and transitions recheck the acting participant's membership. Memory references are authorized when submitted and reauthorized for each reader; inaccessible IDs are omitted with counts. These counts disclose the number of omitted references to an authorized handoff participant. Handoff text itself may contain copied secrets; reference filtering cannot redact them.
 
-Workspace membership removal also removes project memberships in that workspace. It does not revoke every explicit memory grant or disable dependent agents. Disabling an owner does not yet cascade to owned agents. Operators must explicitly revoke grants and disable affected agents according to their offboarding policy. The target lifecycle requirements in [tenant isolation design](TENANT_ISOLATION_DESIGN.md) go beyond the current implementation.
+Workspace membership removal also removes project memberships and revokes grants held, issued, or protected as an agent target by that principal in the workspace. Every explicit-grant authorization path rechecks active subject membership and, for agent scope, target membership. Disabling an owner disables directly owned agents, revokes their active credentials and related grants, and authentication independently requires the owning principal to remain active. Broader ownership transfer, multi-workspace offboarding policy, and hard deletion still require operator-defined workflows; the target lifecycle requirements in [tenant isolation design](TENANT_ISOLATION_DESIGN.md) go beyond the current implementation.
 
 Stored memory, task instructions, results, and client metadata are untrusted context. MemShare does not execute that content. External agent runtimes need their own policy for tool execution and prompt construction. Provider/model labels are client metadata, not proof of provider identity or inference.
 

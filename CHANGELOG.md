@@ -4,6 +4,23 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## Unreleased
 
+## [0.1.1] - 2026-10-28
+
+### Fixed
+
+- Credential rotation preserves the lifetime of currently valid credentials and still supports administrator recovery when no valid credential remains.
+- Expired memory and handoff idempotency keys can be reused without colliding with retained history.
+- PostgreSQL integration tests remove their generated runtime role after a successful run.
+
+### Security
+
+- Workspace removal revokes grants held, issued, or targeted through the removed principal and every grant check requires current workspace membership.
+- Disabling a principal disables directly owned agents and revokes related credentials and grants; authentication and protected transactions independently reject agents with inactive owners.
+- Grant creation locks and validates the issuer, subject, and agent target so lifecycle changes cannot leave a newly inserted stale grant.
+- Migration `0004_principal_lifecycle.sql` backfills lifecycle state and strengthens the credential authentication boundary for existing installations.
+
+## [0.1.0] - 2026-10-27
+
 ### Added
 
 - Public documentation with text architecture diagrams, a local PostgreSQL setup guide, a two-agent cross-LLM walkthrough, and operator recovery instructions.
