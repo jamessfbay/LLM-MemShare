@@ -1,39 +1,40 @@
 # Architecture
 
-This document describes the implemented Rust alpha. The [tenant isolation design](TENANT_ISOLATION_DESIGN.md) also contains future policy requirements; the [API](API.md) is the reference for currently exposed operations.
+This document describes the implemented Rust 0.2.0 beta. The [tenant isolation design](TENANT_ISOLATION_DESIGN.md) also contains future policy requirements; the [API](API.md) is the reference for currently exposed operations.
 
 ## System components
 
 ```text
 CLIENTS                          RUST SERVICE                     STORAGE
 
-User / service  ---- native JSON ----+
-                                    |
-Agent orchestrator A                v
-  +-- external model A       +--------------------------+
-  +-- tool loop ------------>| Axum routes              |
-                             | src/api.rs               |
-Agent orchestrator B         |                          |
-  +-- external model B       | OpenAI / Anthropic       |
-  +-- tool loop ------------>| mappings: src/adapters.rs |
-                             +------------+-------------+
+User / service  ---- native JSON --------+
+Rust application ---- MemShareClient ----+
+Agent orchestrator A                     v
+  +-- external model A       +----------------------------+
+  +-- tool loop ------------>| Axum routes                |
+                             | src/api.rs                 |
+Agent orchestrator B         | provider envelope mappings|
+  +-- external model B       | MCP / A2A method subsets   |
+  +-- tool loop ------------>| adapters.rs / protocols.rs |
+                             +-------------+--------------+
                                           |
-                             +------------v-------------+
-                             | Credential authentication|
-                             | src/auth.rs              |
-                             +------------+-------------+
+                             +-------------v--------------+
+                             | Credential authentication  |
+                             | request limits + metrics   |
+                             | src/auth.rs                |
+                             +-------------+--------------+
                                           |
-                             +------------v-------------+
-                             | Tenant transactions      |
-                             | Policy + use cases       |
-                             | Typed request validation |
-                             | src/api.rs / src/model.rs|
-                             +------------+-------------+
+                             +-------------v--------------+
+                             | Tenant transactions        |
+                             | Policy + admin queries     |
+                             | Typed request validation   |
+                             | src/api.rs / src/model.rs  |
+                             +-------------+--------------+
                                           |
-                             +------------v-------------+       +----------------+
-                             | SQLx pool + migrations   |------>| PostgreSQL     |
-                             | src/db.rs                |       | memshare schema|
-                             +--------------------------+       +----------------+
+                             +-------------v--------------+     +----------------+
+                             | SQLx pool + migrations     |---->| PostgreSQL     |
+                             | src/db.rs                  |     | memshare schema|
+                             +----------------------------+     +----------------+
 
 Operator CLI: migrate / bootstrap / provision-tenant
   +-- owner connection ----------------------------------------> PostgreSQL
@@ -61,7 +62,8 @@ Deployment
   |     |     +-- grants: subject + action + scope + expiry
   |     |     +-- handoffs: source agent -> target agent
   |     |
-  |     +-- memory versions / idempotency records / audit events
+  |     +-- memory versions / idempotency records / chained audit events
+  |     +-- tenant limits / per-credential request counters
   |
   +-- Tenant B: separate identities and tenant-scoped records
 ```
@@ -77,9 +79,10 @@ HTTP request
   |
   +-- validate JSON / path / query / bearer header
   |
-  +-- SHA-256(token) -> fixed authenticate_credential function
+  +-- SHA-256(token) -> fixed authenticate_request function
   |     +-- inactive / expired / revoked identity -> 401
-  |     +-- returns tenant ID + principal ID + kind
+  |     +-- atomically count credential request in database minute
+  |     +-- over limit -> 429; otherwise tenant + principal + kind
   |
   +-- BEGIN on one pooled connection
   +-- set_config(tenant, principal, transaction_local=true)
@@ -89,15 +92,16 @@ HTTP request
   |
   +-- read/write with tenant predicates and RLS
   +-- prepare authorized response; filter memory references
+  +-- attach request-limit headers
   +-- append operation audit metadata
   +-- COMMIT -> JSON response
 
 Any transaction error -> rollback; transaction-local settings end
 ```
 
-Extractor execution order varies by handler. Protected operations share authentication and tenant transactions; public health and contract routes do not enter a tenant transaction. Authorization uses current database state without a process-local permission cache. An operation authorized before revocation commits may finish; later authorization statements observe committed revocation. Pool reuse and cancellation still need the expanded tests listed in the [test plan](TEST_PLAN.md).
+Extractor execution order varies by handler. Protected native, admin, MCP, and A2A operations share authentication and tenant transactions; public health, metrics, Agent Card, and contract routes do not enter a tenant transaction. Authorization uses current database state without a process-local permission cache. An operation authorized before revocation commits may finish; later authorization statements observe committed revocation. Transaction-local context reuse after commit is tested; rollback, cancellation, and error-path reuse still need the expanded matrix in the [test plan](TEST_PLAN.md).
 
-The fixed authentication function is the pre-tenant lookup path. It returns identity fields only, uses a fixed safe search path, and requires an explicit execution grant. Migrations and provisioning use the separate owner connection. `serve` rejects an owner, superuser, `BYPASSRLS`, `CREATEROLE`, or `CREATEDB` role.
+The fixed authentication function is the pre-tenant lookup path. It returns identity and request-window fields only, uses a fixed safe search path, and requires an explicit execution grant. It also updates `last_used_at` at most once per minute and removes old counters for that tenant. Migrations and provisioning use the separate owner connection. `serve` rejects an owner, superuser, `BYPASSRLS`, `CREATEROLE`, or `CREATEDB` role.
 
 ## Memory path
 
@@ -112,10 +116,30 @@ update/delete -> find authorized row -> lock row
               -> change content or deleted_at; increment version -> commit
 
 read/list -> filter tenant + authority + deletion + expiry
-          -> apply ordering/limit -> return permitted rows
+          -> apply `(updated_at,id)` cursor + ordering/limit
+
+history -> reauthorize current live memory
+        -> return stored prior versions with an integer version cursor
 ```
 
-Idempotent replay reauthorizes the result. Updates and deletes reject stale versions with 409. Deletion is logical; history and backups can retain content. Search is a bounded substring query, with no vector database or background index.
+Idempotent replay reauthorizes the result. Updates and deletes reject stale versions with 409. Deletion is logical; history and backups can retain content. The history API is unavailable after logical deletion because it first authorizes the current live row. Search is a bounded substring query, with no vector database or background index.
+
+## Operational control path
+
+```text
+Tenant administrator
+  +-- GET/PATCH tenant limits
+  +-- list principals / workspaces / grants / credentials / audit events
+                         |
+                         v
+tenant_limits row -- lock + count current resource rows --> allow or 429
+request credential -- authenticate_request() -----------> allow or 429
+authenticated 4xx/5xx ---------------- best-effort -----> audit_events
+audit insert ---------- per-tenant head + SHA-256 ------> hash chain
+all process responses ----------------------------------> in-memory metrics
+```
+
+Resource quotas serialize on the tenant limit row before counting and inserting. They bound principal rows, non-deleted memories, and queued/claimed handoffs. Request limiting is per credential and uses a fixed database-clock minute, so API processes share the same decision. Audit insertion locks a per-tenant chain head, hashes metadata with the previous event hash, and advances the head. Administrators can recalculate the chain, but database-owner access can rewrite both rows and head; this provides tamper evidence, not external immutability. Metrics are process-local counters and reset on restart. They contain no tenant labels and are not a substitute for capacity, latency, or database monitoring.
 
 ## Cross-LLM task exchange
 
@@ -173,18 +197,21 @@ Each successful transition increments the version. Completed and cancelled recor
                      versions / leases / task state
 ```
 
-The API tier is stateless. Related requests may reach different processes; no sticky session is required. PostgreSQL is the single consistency dependency. The optional multi-instance script exercises memory writes, revocation visibility, tenant denial, and deterministic cross-provider handoffs across three processes. Database failover, capacity, load balancer behavior, and network partitions need separate operational evidence.
+The API tier is stateless. Related requests may reach different processes; no sticky session is required. PostgreSQL is the single consistency dependency. `scripts/verify-multi-process.sh` builds once, creates a disposable database and runtime role, starts three native API processes, and checks cross-process retries, reads, tenant denial, protocol discovery, admin queries, and metrics without Docker. The Compose-based multi-instance scenario remains available for container validation. Database failover, capacity, load balancer behavior, and network partitions need separate operational evidence.
 
 ## Module map and extension points
 
 | Location | Responsibility |
 | --- | --- |
 | `src/main.rs`, `src/config.rs` | CLI, environment configuration, startup, graceful shutdown. |
-| `src/auth.rs` | Bearer authentication and request principal context. |
-| `src/api.rs` | HTTP extraction, policy checks, queries, state transitions, auditing. |
+| `src/auth.rs` | Bearer authentication, request-window enforcement, request principal context, process metrics. |
+| `src/api.rs` | HTTP extraction, policy checks, admin queries, quotas, state transitions, auditing. |
 | `src/model.rs`, `src/error.rs` | Typed payloads/responses and stable error envelope. |
 | `src/adapters.rs`, `contracts/` | Provider-envelope mappings and public contracts. |
+| `src/protocols.rs` | MCP 2025-06-18 and A2A 0.2.6 method subsets over native handoff use cases. |
+| `src/client.rs` | Asynchronous Rust client for memory and handoff routes. |
 | `src/db.rs`, `migrations/` | Connection pool, role validation, provisioning, versioned schema. |
 | `tests/multi_tenant.rs` | Real PostgreSQL HTTP and RLS integration journey. |
+| `tests/security_concurrency.rs` | Operational-limit, audit, lock ordering, database-clock lease, revocation, and pool-reuse checks. |
 
 Future derived indexes must remain rebuildable and reauthorize candidates against PostgreSQL. Proposed extraction, approval, retention, and deletion workflows are described in the [implementation plan](IMPLEMENTATION_PLAN.md); they are not part of the implemented runtime.

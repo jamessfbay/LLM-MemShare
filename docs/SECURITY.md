@@ -1,12 +1,12 @@
 # Security boundaries
 
-LLM-MemShare is a security-sensitive alpha. It has implemented isolation controls and automated tests; independent security review and production operational gates remain pending.
+LLM-MemShare is a security-sensitive beta. It has implemented isolation controls and automated tests; independent security review and production operational gates remain pending.
 
 ## Identity and tenancy
 
 Bearer credentials are random 256-bit values. PostgreSQL stores SHA-256 digests, and generated tokens are returned once at issuance. Credentials can expire, be revoked, or be rotated. Rotation preserves the lifetime of the active credential set, so a temporary credential cannot make itself permanent. Disabling a principal revokes its active credentials and grants and disables directly owned agents. A suspended tenant cannot authenticate.
 
-Authentication resolves the principal and tenant through a fixed, schema-qualified `SECURITY DEFINER` function with a fixed safe search path. Client tenant/actor headers do not establish authority. Protected handlers enter a transaction, set transaction-local tenant/principal context, recheck active identity, and apply operation authorization.
+Authentication resolves the principal and tenant through a fixed, schema-qualified `SECURITY DEFINER` function with a fixed safe search path. The same database operation atomically counts the credential in a fixed minute window and updates `last_used_at` at most once per minute. Client tenant/actor headers do not establish authority. Protected handlers enter a transaction, set transaction-local tenant/principal context, recheck active identity, and apply operation authorization.
 
 Tenant relations use composite tenant foreign keys and RLS. The runtime must be a non-owner with `NOSUPERUSER`, `NOBYPASSRLS`, `NOCREATEROLE`, and `NOCREATEDB`; startup checks these attributes and table ownership. Operators must also review inherited privileges. The migration/operator identity must not serve HTTP traffic.
 
@@ -22,10 +22,14 @@ Workspace membership removal also removes project memberships and revokes grants
 
 Stored memory, task instructions, results, and client metadata are untrusted context. MemShare does not execute that content. External agent runtimes need their own policy for tool execution and prompt construction. Provider/model labels are client metadata, not proof of provider identity or inference.
 
+MCP and A2A requests use the same bearer authentication, tenant context, grants, quotas, and handoff use cases as native routes. They remain untrusted JSON-RPC inputs and implement only the documented method subsets. The public A2A Agent Card uses the validated `MEMSHARE_PUBLIC_BASE_URL` configuration and ignores request host and forwarded headers. MemShare does not execute model output or establish the identity of an external provider.
+
 ## Operations and remaining gates
 
-The application does not encrypt database records itself. Use encrypted storage, TLS across trust boundaries, and secret delivery outside source control. Current audit inserts and application logs avoid memory text and tokens. Audit rows are ordinary database metadata; full denial auditing and external tamper-resistant collection are not implemented.
+The application does not encrypt database records itself. Use encrypted storage, TLS across trust boundaries, and secret delivery outside source control. Current audit inserts and application logs avoid memory text and tokens. Authenticated handler denials/failures and request-limit rejections are audited on a best-effort basis; unknown credentials cannot be attributed, and an audit-write failure does not replace the original response. Audit rows form a per-tenant SHA-256 chain that administrators can verify. The chain detects ordinary row or head inconsistency, but a database owner can rewrite both; external tamper-resistant collection is not implemented.
 
-Logical deletion preserves history and may leave content in backups. Hard deletion, retention enforcement, backup deletion replay, quotas/rate limits, complete policy-matrix coverage, cancellation/pool-reuse tests, operational restore exercises, dependency scanning, and independent security review remain release gates. A reproducible authorization leak blocks release.
+Tenant row quotas and per-credential request windows reduce accidental exhaustion but are not complete denial-of-service controls. They do not limit bytes, database cost, concurrent work, public endpoints, or traffic before the application. Public process metrics contain aggregate counters without tenant labels and reset on restart; ingress policy must decide whether to expose them.
+
+Logical deletion preserves history and may leave content in backups. Hard deletion, retention enforcement, backup deletion replay, measured capacity, complete policy-matrix coverage, rollback/error/cancellation pool-reuse tests, operational restore exercises, full MCP/A2A conformance, and independent security review remain release gates. CI now runs a dependency audit, but its documented transitive uncompiled-`rsa` exception and the full software supply chain still require ongoing review. A reproducible authorization leak blocks release.
 
 The [test plan](TEST_PLAN.md) identifies reproducible evidence and gaps. [Operations](OPERATIONS.md) covers role separation, suspension recovery, and migration constraints. Report vulnerabilities privately through [GitHub private reporting](https://github.com/jamessfbay/LLM-MemShare/security/advisories/new), following the [security policy](../.github/SECURITY.md).

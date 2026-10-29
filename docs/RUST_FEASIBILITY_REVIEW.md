@@ -1,6 +1,6 @@
 # Rust implementation feasibility review
 
-Status: accepted with staged delivery. Review date: 2026-10-26.
+Status: accepted with staged delivery; implementation status refreshed for 0.2.0 beta on 2026-10-29. Original review date: 2026-10-26.
 
 ## Decision
 
@@ -36,7 +36,7 @@ This ordering makes failures attributable and rollback possible. It also avoids 
 | Owner-bound agent credentials and grants | Preserve explicit grants, replace user-bound identity with tenant-scoped principals. |
 | Memory CRUD and idempotency | Reimplement with tenant/principal/operation key scope and authorization on replay. |
 | Handoff and proposal concepts | Preserve product behavior, implement typed Rust contracts after base memory authorization. |
-| Previous client and adapters | Removed after the Rust contracts and tests became authoritative. |
+| Previous client and adapters | Replaced by the in-crate asynchronous Rust client, provider-envelope mappings, and narrow MCP/A2A adapters backed by native authorization. |
 | Previous tests | Removed after the Rust integration suite covered the supported behavior. |
 
 ## Request and test flow
@@ -72,13 +72,13 @@ Two-tenant integration path [implemented]
   +-- direct runtime SQL under B context ---------------> zero A rows
 ```
 
-Required next tests:
+Required next tests after the beta foundation:
 
-- Connection reuse after commit, rollback, cancellation and error.
-- Credential expiry, revocation and tenant suspension.
+- Connection reuse after rollback, cancellation and error. Commit reuse now has PostgreSQL coverage.
+- Complete credential expiry, revocation and tenant-suspension matrix. Credential revocation has a deterministic integration case.
 - Expanded workspace/project role boundaries and offboarding cases; membership-removal paths now have integration coverage.
 - Idempotency replay after revoke, delete and expiry, plus concurrent duplicates.
-- Conditional delete conflicts and finer-grained deterministic barriers. A three-instance system test now proves one winner and one 409 for simultaneous same-version updates.
+- Conditional delete conflicts and finer-grained deterministic barriers. Opposing grant insertion and grant-versus-lifecycle changes now have deterministic integration coverage; the native three-process test validates cross-process retry/read behavior but is not a full race or load test.
 - Handoff grant-revocation ordering, expiration, and concurrent claim/complete barriers. Listing, cancellation, claim/release, creation, reference omission, participant visibility, version conflict, provider-envelope mappings, and cross-tenant rejection are covered by the current integration journey.
 - Clean install, representative legacy upgrade and failed-migration recovery.
 - Expand the runtime catalog audit to cover role assumption and every schema privilege; owner, superuser, `BYPASSRLS`, `CREATEROLE`, `CREATEDB`, and table ownership are already rejected at startup.
@@ -88,8 +88,8 @@ Required next tests:
 | Code path | Production failure | Test now | Handling now | Client result |
 | --- | --- | --- | --- | --- |
 | Credential lookup | Database unavailable | No | Database error normalization | Stable 500; token omitted from logs |
-| Tenant transaction | Pooled connection retains old context | Partial | Transaction-local settings | Fails closed; reuse test pending |
-| Grant read | Revoke races an authorized operation | No | Documented in-flight semantics | Subsequent request denied |
+| Tenant transaction | Pooled connection retains old context | Partial | Transaction-local settings | Commit reuse covered; rollback/error/cancellation pending |
+| Grant read | Revoke races an authorized operation | Partial | Sorted locks and documented in-flight semantics | Lifecycle races covered; wider revocation snapshot matrix pending |
 | Memory create | Concurrent duplicate idempotency key | No | Advisory lock and hash conflict | Existing result or 409 |
 | Memory update | Stale or concurrent version | Yes | Row lock, explicit comparison and affected-row check | Three-instance race yields one 200 and one 409 |
 | Migration | Partial DDL or incompatible legacy row | Clean install | Operator error | Command fails; recovery test pending |
@@ -100,7 +100,7 @@ There are no intentionally silent failures. Pool-reuse/cancellation, broader con
 
 ## Performance review
 
-The alpha favors correct authorization over speculative caching. Substring search can scan accessible rows and repeated membership/grant checks may become expensive. Before production, collect query plans at representative sizes, add tenant-leading indexes or PostgreSQL full-text search, and set measured latency budgets. Do not cache authorization until invalidation is proven. Pool, body, query and tenant concurrency limits need load-test values.
+The beta favors correct authorization over speculative caching. Substring search can scan accessible rows and repeated membership/grant checks may become expensive. Initial row quotas and fixed-minute request windows bound some growth and request frequency, but not bytes, database work or concurrency. Before production, collect query plans at representative sizes, add tenant-leading indexes or PostgreSQL full-text search, and set measured latency budgets. Do not cache authorization until invalidation is proven. Pool, body, query and tenant concurrency limits need load-test values.
 
 ## Parallel implementation lanes
 
@@ -114,12 +114,12 @@ The alpha favors correct authorization over speculative caching. Substring searc
 
 Run A first. B and independent parts of D can proceed together. C follows A+B. E waits for security gates. Keep migration and authorization tests in one lane to avoid inconsistent policies.
 
-## NOT in scope for the first alpha
+## NOT in scope for the current beta foundation
 
 - Cross-tenant sharing: changes the isolation contract and needs a separate threat model.
 - Semantic/vector search: derived indexes wait until revocation and deletion are proven.
 - Automatic LLM extraction: external transfer and quality evaluation are separate work.
-- Full protocol servers: compatibility requires pinned specifications and conformance tests.
+- Full protocol servers: only documented MCP 2025-06-18 and A2A 0.2.6 subsets exist; compatibility still requires external conformance tests.
 - Embedded library mode: service authorization is the first supported boundary.
 - Hard erasure from offline backups: requires retention, tombstones and restore replay.
 - UI/admin console: the first release is API and operator CLI only.
@@ -129,7 +129,7 @@ Run A first. B and independent parts of D can proceed together. C follows A+B. E
 - Scope: accepted with staged delivery; the final multi-tenant objective is unchanged.
 - Architecture: 6 issues identified, 5 addressed in the initial implementation and 1 planned module split.
 - Code quality: typed contracts, normalized errors and centralized tenant transactions selected.
-- Tests: request/isolation diagram produced; the cross-instance update race is verified and the remaining test groups are tracked.
+- Tests: request/isolation diagram produced; PostgreSQL tenant, quota, audit, lifecycle, clock and commit-reuse evidence plus a native three-process check exist, and the remaining test groups are tracked.
 - Performance: 3 measured follow-ups identified; no authorization cache introduced.
-- Critical gaps: connection pool reuse and cancellation evidence remain; broader concurrency orderings and catalog privilege coverage are still required.
+- Critical gaps: rollback/error/cancellation pool evidence, broader concurrency orderings, complete policy/privilege coverage, recovery proof, full protocol conformance, and independent security certification remain.
 - Parallelization: 5 lanes; A first, B+D partly parallel, then C and E.

@@ -1,6 +1,6 @@
 # Multi-tenant open-source middleware implementation plan
 
-Status: active implementation. Baseline: Rust 0.1.1 alpha on 2026-10-28. Target capabilities are future work unless explicitly identified as implemented. The current alpha is not a production multi-tenant security boundary.
+Status: active implementation. Baseline: Rust 0.2.0 beta on 2026-10-29. Target capabilities are future work unless explicitly identified as implemented. The current beta is not independently certified as a production multi-tenant security boundary.
 
 The [Rust feasibility review](RUST_FEASIBILITY_REVIEW.md) accepts the target architecture with staged delivery and records the remaining production release blockers.
 
@@ -14,26 +14,30 @@ The first release excludes cross-tenant sharing, model weight or private reasoni
 
 ## Current baseline
 
-The production target is a Rust service using Axum, Tokio, SQLx, Serde and tracing. Implemented code includes an embedded tenant-aware migration, operator bootstrap and tenant provisioning, tenant-scoped users and agents, workspace/project membership tables, expiring and revocable credentials, explicit grants, memory CRUD, logical history, idempotent creation, server-controlled provenance, audit metadata, row-level security, a least-privilege runtime role check, Compose, CI, and a real two-tenant PostgreSQL integration test.
+The production target is a Rust service using Axum, Tokio, SQLx, Serde and tracing. Implemented code includes embedded tenant-aware migrations, operator bootstrap and tenant provisioning, tenant-scoped users and agents, workspace/project membership tables, expiring and revocable credentials, explicit grants, memory CRUD and cursor-based history, idempotent creation, server-controlled provenance, row-level security, a least-privilege runtime role check, Compose, CI, and real PostgreSQL tenant/security integration tests.
 
-The HTTP surface now exposes additional users/services, workspaces, projects, memberships, principal and tenant status, and credential rotation. Handoffs include stable inbox/outbox cursor pagination, bounded claim leases, reclaim, release, cancellation, completion, active-membership checks, typed payloads, and symmetric provider-envelope mappings. Embedded OpenAPI documents the route inventory. Proposals/review, hard deletion, context bundles, external SDKs, and legacy-data migration tooling remain unimplemented. These gaps and the production release gates below must be resolved before a security or maturity claim. See [README](../README.md), [API](API.md), and [security](SECURITY.md) for the exact current contract.
+The HTTP surface now exposes tenant limits; cursor-based administrator views for principals, workspaces, grants, credentials, and audit events; a tenant audit-chain verification endpoint; stable memory cursors and prior versions; and process-local metrics. Handoffs include stable inbox/outbox cursor pagination, bounded claim leases, reclaim, release, cancellation, completion, active-membership checks, typed payloads, and symmetric provider-envelope mappings. The crate exports a partial Rust client, and authenticated MCP 2025-06-18 and A2A 0.2.6 subsets reuse the native handoff use cases. A native three-process script, LCOV generation, dependency auditing, weekly dependency updates, and checksummed release artifacts with SBOM/provenance are automated. Embedded OpenAPI remains a route inventory rather than an exhaustive schema contract.
+
+Proposals/review, hard deletion, context bundles, external SDKs for other languages, full MCP/A2A conformance, legacy-data migration tooling, recovery proof, measured capacity, and independent security certification remain unimplemented. MemShare does not run model inference or transfer provider sessions. These gaps and the production release gates below must be resolved before a production security or maturity claim. See [README](../README.md), [API](API.md), and [security](SECURITY.md) for the exact current contract.
 
 ## Implementation snapshot
 
 | Area | State | Executable evidence | Next gate |
 | --- | --- | --- | --- |
 | Rust service and configuration | Implemented | `cargo check`, Clippy, unit tests | Configuration matrix and graceful failure tests |
-| Tenant schema and RLS | Implemented alpha | Embedded migration and non-owner PostgreSQL test | Full relation/action catalog audit |
-| Credentials, agents, and grants | Implemented alpha | HTTP create/rotate/grant/revoke journey | Expiration and ownership-transfer matrix |
-| Memory CRUD and search | Implemented alpha | HTTP create/read/list/update/delete paths | Cursor pagination, policy matrix, load baseline |
-| Idempotency and versions | Implemented alpha | Advisory-key serialization and row-locked conditional writes | Deterministic concurrent transaction tests |
-| Deployment | Implemented alpha | Non-root image, role-separated Compose, readiness endpoint | Clean-install, upgrade, restore, and rollback exercises |
-| Handoffs and review | Implemented alpha handoff core | Directed grant plus list/create/read/lease/release/complete and membership-removal integration journey | Proposal/review locking and expanded races |
-| SDKs, OpenAPI, adapters | Partial | Embedded OpenAPI, versioned tool contract, and symmetric provider-envelope mappings | External SDKs and wider protocol conformance |
+| Tenant schema and RLS | Implemented beta foundation | Embedded migrations and non-owner PostgreSQL tests | Full relation/action catalog audit and legacy fixture |
+| Credentials, agents, and grants | Implemented beta foundation | HTTP create/rotate/grant/revoke plus lifecycle/concurrency journey | Expiration and ownership-transfer matrix |
+| Memory CRUD and search | Implemented beta foundation | HTTP CRUD, stable list cursors, and authorized history | Policy matrix, byte limits, and load baseline |
+| Idempotency and versions | Implemented beta foundation | Advisory-key serialization, row-locked writes, and lifecycle races | Wider deterministic retry/revocation barriers |
+| Operational controls | Implemented beta foundation | Row quotas, request windows, admin queries, audit-chain verification, and process metrics | Persistent observability, measured capacity, retention, and recovery |
+| Deployment | Implemented beta foundation | Non-root image, role-separated Compose, readiness, and native three-process verification | Upgrade, restore, failover, and rollback exercises |
+| Handoffs and review | Implemented handoff core | Directed grant plus list/create/read/lease/release/complete and membership-removal integration journey | Proposal/review locking and expanded races |
+| SDKs, OpenAPI, adapters | Partial | In-crate Rust client, route-inventory OpenAPI, provider envelopes, MCP subset, and A2A subset | Route-complete SDK and external protocol conformance |
+| Supply chain and releases | Partial | Pinned Actions, initial coverage threshold and artifact, dependency audit/update workflow, tag verification tests, checksums, SBOM, and provenance | Broader platforms, signing policy, license verification, and reproducible-build evidence |
 
 ## Proposed tenant and authorization model
 
-This is the starting design for M0, subject to validation against executable scenarios before schema implementation. The detailed [tenant isolation design](TENANT_ISOLATION_DESIGN.md) specifies the proposed data model, policy, database roles, migration and release gates. Changes must update the policy matrix and tests.
+This is the implemented starting model, still subject to completion of the policy matrix and production release gates. The detailed [tenant isolation design](TENANT_ISOLATION_DESIGN.md) specifies the data model, policy, database roles, migration and release gates. Changes must update the policy matrix and tests.
 
 - A deployment contains tenants. A tenant is the isolation and administrative boundary; cross-tenant access is denied. Tenant identifiers are stable and never recycled.
 - A principal is a tenant-scoped user, service or agent. A person in two tenants has distinct memberships and credentials. Authentication establishes the principal and tenant; workspace selection requires a membership check.
@@ -94,20 +98,20 @@ Each milestone requires implementation, documentation and automated evidence. Da
 
 Exit: the two-tenant journey and negative cases have executable specifications; database tests run in CI; schema and migration design are reviewed against the matrix. Pending tests cannot count as passing.
 
-### M1 — Multi-tenant alpha
+### M1 — Multi-tenant alpha core
 
 - [x] Add versioned migrations and operator-controlled bootstrap and tenant provisioning. Legacy-data migration remains a separate explicit work package; ownership must never be inferred silently.
 - [x] Implement tenant-scoped users, services and agents, workspace/project membership, grants and credential expiration, revocation and rotation. Establish runtime database roles and RLS policy tests.
-- [ ] Complete typed memory and handoff lifecycle behavior, provenance, conditional updates, review locking and idempotency. Handoff list/create/read/claim/reclaim/release/cancel/complete, stable opaque pagination, reference filtering, and directed grants are implemented; proposal/review flows and remaining concurrency cases are pending.
-- [ ] Deliver Axum HTTP contracts, a CLI, configuration and self-hosted Compose. The core journey needs no external model or vector database.
+- [ ] Complete typed memory and handoff lifecycle behavior, provenance, conditional updates, review locking and idempotency. Memory CRUD/history and handoff list/create/read/claim/reclaim/release/cancel/complete, stable opaque pagination, reference filtering, and directed grants are implemented; proposal/review flows and remaining concurrency cases are pending.
+- [x] Deliver Axum HTTP contracts, operator CLI commands, configuration and self-hosted Compose. The core journey needs no external model or vector database.
 
 Exit: the two-tenant journey passes against PostgreSQL, including ID guessing, search, export, grants, retry, references and revocation. Test concurrency orderings, migration from a representative prototype fixture and clean installation. Release as alpha without a production security claim.
 
-### M2 — Security and operational beta
+### M2 — Security and operational beta — in progress
 
-- [ ] Complete and test multi-workspace offboarding, ownership transfer, run-bound credentials, rate limits, retention, hard deletion and recovery. Provide structured audit and audit-reader access controls; document actual tamper resistance.
+- [ ] Complete and test multi-workspace offboarding, ownership transfer, run-bound credentials, retention, hard deletion and recovery. Initial row quotas, per-credential fixed-minute request limits, administrator queries, and a verifiable per-tenant audit hash chain are implemented; byte/concurrency controls, retention, external audit durability, and the remaining lifecycle work are pending.
 - [ ] Document TLS, least privilege, secrets, backup/restore, deletion replay, upgrades and incident response. Test connection-pool and background-operation isolation.
-- [ ] Expand matrix tests across operations and scopes, including concurrent revocation, expiration, crashes and restore. A reproducible authorization leak blocks release.
+- [ ] Expand matrix tests across operations and scopes, including concurrent revocation, expiration, crashes and restore. Commit-time pool reuse, opposing grants, lifecycle races, database-clock leases, and credential revocation now have PostgreSQL evidence; rollback/error/cancellation and the wider matrix remain open. A reproducible authorization leak blocks release.
 - [ ] Obtain independent security review and remediate findings before claiming production tenant isolation. Budget and schedule review separately; a clearly labeled beta does not require that claim.
 
 Exit: matrix and threat-model tests pass; backup/restore and deletion replay are demonstrated; known gaps are documented. A production isolation claim requires review, remediation and the documented deployment controls.
@@ -117,15 +121,15 @@ Exit: matrix and threat-model tests pass; backup/restore and deletion replay are
 - [ ] Improve keyword search and context ranking; create a versioned labeled evaluation dataset and measure recall, latency and tenant isolation. Set thresholds after establishing a baseline.
 - [ ] If justified, add optional embeddings and PostgreSQL vector indexing, model/version metadata, transactional outbox, idempotent workers, deletion propagation and reindex. Test stale indexes, retries and isolation before enabling them.
 - [ ] Make extraction opt-in with validated outputs and policy-controlled review; preserve a core mode without external services.
-- [ ] Select a protocol version and official SDK for a real client integration; implement transport, authentication and conformance tests before claiming compatibility. A prototype adapter may be explored earlier but cannot bypass authorization or block M1.
+- [ ] Complete real-client protocol integrations. MCP 2025-06-18 and A2A 0.2.6 method subsets and an in-crate Rust HTTP client are implemented through native authorization, but no full protocol conformance or route-complete SDK claim is made.
 
 Exit: evaluation reports dataset, configuration, resource use, latency, cost and limitations; stale or unavailable indexes cannot expose unauthorized data; a real client completes the tenant-scoped journey.
 
 ### M4 — Production candidate and open-source operations
 
-- [ ] Provide non-root images, deployable configuration, capacity guidance, logs, metrics, tracing, alerts and tested upgrade/rollback. Run load, soak, failure and restore exercises.
-- [ ] Harden releases with protected branches, least-privilege build credentials, pinned dependencies, vulnerability scanning, SBOM, provenance and artifact signing. Verify third-party licenses and artifact identity.
-- [ ] Publish governance, support and maintenance expectations, compatibility policy, changelog, examples and migration guides. Seek independent reproduction of at least two integrations.
+- [ ] Provide non-root images, deployable configuration, capacity guidance, persistent metrics, tracing, alerts and tested upgrade/rollback. Process-local aggregate metrics and a native three-process verification gate exist; load, soak, failure and restore exercises remain.
+- [ ] Harden releases with protected branches, least-privilege build credentials, pinned dependencies, vulnerability scanning, SBOM, provenance and artifact signing. CI already pins Actions, audits dependencies, uploads LCOV, and produces checksummed Linux/macOS archives with CycloneDX SBOM and GitHub provenance; reproducible builds, broader platform coverage, signing policy, and license verification remain.
+- [ ] Publish governance, support and maintenance expectations, compatibility policy, changelog, examples and migration guides. Initial governance, conduct, support, and beta compatibility policies are published; stable 1.0 deprecation/support windows, migration guides, and independent reproduction of at least two integrations remain.
 
 Exit: operational evidence and security-review remediation are documented; integration and recovery reports are reproducible. A 1.0 release additionally requires a stable API and compatibility policy. Suitability depends on the deployment and threat model.
 
@@ -138,7 +142,7 @@ Exit: operational evidence and security-review remediation are documented; integ
 | 3 | Schema and migration | Tenant-aware schema, runtime roles and migration fixture; depends on package 1. |
 | 4 | Identity and authorization | Provisioning, membership, grants, credentials and RLS defense; cross-tenant tests pass. |
 | 5 | Memory and handoff correctness | Review concurrency, idempotency, provenance and reference checks; depends on 3–4. |
-| 6 | End-to-end alpha | SDK, deployment, docs and two-tenant journey; depends on 2–5. |
+| 6 | End-to-end beta foundation | Rust client subset, deployment, docs, two-tenant journey, native three-process check and release controls; depends on 2–5. |
 
 Split packages into reviewable issues and PRs with prerequisites, schema/API changes, tests, migration and rollback notes. Assign owners and estimates after the M0 design is accepted. No external repository changes are assumed.
 
@@ -152,6 +156,6 @@ Use SemVer with explicit 0.x migration notes. Release notes include breaking cha
 
 ## Current release decision
 
-The project is published as an alpha. Its [architecture](ARCHITECTURE.md), [local setup](GETTING_STARTED.md), [integration walkthrough](INTEGRATIONS.md), and [operations guide](OPERATIONS.md) describe the implemented service. The [test plan](TEST_PLAN.md) maps current evidence to remaining gaps.
+The project is documented as a 0.2.0 beta foundation. Its [architecture](ARCHITECTURE.md), [local setup](GETTING_STARTED.md), [integration walkthrough](INTEGRATIONS.md), and [operations guide](OPERATIONS.md) describe the implemented service. The [test plan](TEST_PLAN.md) maps current evidence to remaining gaps.
 
-Connection-pool reuse/cancellation tests, broader concurrency orderings, complete privilege/policy-matrix checks, and operational recovery evidence remain open. Production tenant-isolation claims require the release gates and independent security review described above.
+Rollback/error/cancellation pool-reuse tests, broader concurrency orderings, complete privilege/policy-matrix checks, operational recovery evidence, measured capacity, and independent protocol conformance remain open. Production tenant-isolation claims require the release gates and independent security review described above.

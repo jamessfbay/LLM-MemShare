@@ -7,25 +7,27 @@ Permissioned memory and task handoffs for agents, across model providers.
 
 LLM-MemShare is open-source middleware written in Rust. Applications use one HTTP service to store shared context, control access, and pass versioned tasks between agents. A deployment can host multiple tenants; bearer credentials identify each tenant and principal, while PostgreSQL stores authorization and task state.
 
-**Status: 0.1.1 alpha.** The implemented API includes tenant administration, credentials, grants, memory CRUD, and leased agent handoffs. Production security review, recovery exercises, and remaining release gates are tracked in the [roadmap](docs/ROADMAP.md).
+**Status: 0.2.0 beta.** The implemented API includes tenant administration, operational limits, credentials, grants, cursor-based memory access, leased agent handoffs, a Rust client, and narrow MCP/A2A adapters. Production security certification, recovery exercises, and remaining release gates are tracked in the [roadmap](docs/ROADMAP.md).
 
 ## Architecture at a glance
 
 ```text
-Application / agent orchestrators
+Applications / agent orchestrators / Rust client
   |
   +-- Agent A: model/provider A -- function_call --+
   +-- Agent B: model/provider B -- tool_use -------+-- Authenticated HTTP
+  +-- MCP or A2A client --------- JSON-RPC -------+
   +-- Any HTTP client ----------- native JSON ----+          |
                                                            v
   +------------------------------------------------------------+
   | LLM-MemShare: stateless Rust API processes                   |
   |                                                            |
-  | Native routes / provider envelope mappings                  |
+  | Native routes / provider envelopes / MCP + A2A subsets      |
   |                         |                                  |
   | Credential lookup -> tenant + principal -> authorization   |
   |                         |                                  |
   | Administration | memories + grants | leased handoffs       |
+  | Limits + rate checks | audit queries | process metrics      |
   |                         |                                  |
   | SQLx transactions, versions, idempotency, audit metadata    |
   +-------------------------+----------------------------------+
@@ -46,13 +48,15 @@ External orchestrators run model calls and tool loops. MemShare stores the autho
 | Capability | Implemented behavior |
 | --- | --- |
 | Multiple tenants | Operator provisioning, tenant-scoped identities, database row-level security. |
-| Administration | Users, services, agents, tenant roles, workspaces, projects, memberships, principal disablement, tenant suspension. |
+| Administration | Users, services, agents, tenant roles, workspaces, projects, memberships, lifecycle controls, tenant suspension, and cursor-based tenant-admin queries. |
 | Credentials | Random bearer tokens, digest storage, expiration, revocation, rotation. |
-| Permissioned memory | Private/workspace/project/agent scopes, explicit grants, CRUD, keyword filtering, history, logical deletion. |
+| Permissioned memory | Private/workspace/project/agent scopes, explicit grants, CRUD, keyword filtering, stable cursors, authorized version history, logical deletion. |
 | Safe retries | Idempotency keys for creation; versions and row locks for mutations. |
 | Agent handoffs | Inbox/outbox with cursors, create, claim, lease recovery, release, complete, cancel. |
 | Cross-LLM exchange | Native JSON plus OpenAI-style and Anthropic-style envelopes for create, claim, and complete. |
-| Operations | Embedded migrations, runtime-role checks, readiness, structured logs, CI and source-package verification. |
+| Rust client | In-crate asynchronous client for memory CRUD/list and native/provider-envelope handoff flows. |
+| Protocol adapters | Authenticated MCP 2025-06-18 tools subset and A2A 0.2.6 message/task subset with a public Agent Card. |
+| Operations | Tenant quotas, per-credential request limits, tamper-evident audit-chain queries, process-local metrics, embedded migrations, runtime-role checks, coverage, dependency audit, and release provenance. |
 
 ## Start locally
 
@@ -115,7 +119,7 @@ Use the [integration walkthrough](docs/INTEGRATIONS.md) for runnable HTTP exampl
 
 ## API and verification
 
-Public endpoints: `GET /health/live`, `GET /health/ready`, `GET /v1/openapi.json`, and `GET /v1/tool-contracts/handoff`. All resource routes use bearer authentication. The embedded OpenAPI document is a route inventory; [API documentation](docs/API.md) and the handoff tool schema provide request details.
+Public endpoints: `GET /health/live`, `GET /health/ready`, `GET /metrics`, `GET /.well-known/agent-card.json`, `GET /v1/openapi.json`, and `GET /v1/tool-contracts/handoff`. Resource, admin, MCP, and A2A routes use bearer authentication. The embedded OpenAPI document is a route inventory; [API documentation](docs/API.md) and the handoff tool schema provide request details.
 
 ```sh
 cargo fmt --all -- --check
@@ -127,12 +131,12 @@ MEMSHARE_TEST_DATABASE_URL='postgresql://TEST_ADMIN:TEST_PASSWORD@127.0.0.1:5432
   cargo test --all-targets --all-features
 ```
 
-Integration tests create a temporary database and run requests through a non-owner runtime role. [Testing documentation](docs/TEST_PLAN.md) describes coverage and remaining gaps. The optional `scripts/verify-multi-instance.sh` system test uses Docker Compose; it is separate from the local Cargo workflow.
+Integration tests create temporary databases and run requests through non-owner runtime roles. [Testing documentation](docs/TEST_PLAN.md) describes coverage and remaining gaps. `scripts/verify-multi-process.sh` starts three native processes against a disposable PostgreSQL database without Docker; the older Compose scenario remains optional.
 
 ## Documentation
 
 Start with the [documentation index](docs/README.md), [setup guide](docs/GETTING_STARTED.md), [architecture](docs/ARCHITECTURE.md), [API](docs/API.md), [integrations](docs/INTEGRATIONS.md), and [operations](docs/OPERATIONS.md).
 
-The current release does not include model inference, private reasoning/session transfer, MCP/A2A conformance, semantic/vector retrieval, proposal approval, administrative hard deletion, or a published external SDK. See the [roadmap](docs/ROADMAP.md) and [implementation plan](docs/IMPLEMENTATION_PLAN.md).
+The current release does not include model inference, provider-session or private-reasoning transfer, full MCP/A2A conformance, semantic/vector retrieval, proposal approval, administrative hard deletion, or SDKs for languages other than Rust. See the [roadmap](docs/ROADMAP.md) and [implementation plan](docs/IMPLEMENTATION_PLAN.md).
 
-Contributions follow [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities through [private vulnerability reporting](https://github.com/jamessfbay/LLM-MemShare/security/advisories/new), as described in the [security policy](.github/SECURITY.md). Licensed under [Apache-2.0](LICENSE).
+Contributions follow [CONTRIBUTING.md](CONTRIBUTING.md), [governance](GOVERNANCE.md), the [code of conduct](CODE_OF_CONDUCT.md), and the [support policy](SUPPORT.md). Report vulnerabilities through [private vulnerability reporting](https://github.com/jamessfbay/LLM-MemShare/security/advisories/new), as described in the [security policy](.github/SECURITY.md). Licensed under [Apache-2.0](LICENSE).

@@ -1,8 +1,8 @@
 # Multi-tenant isolation: implementation design
 
-Status: target policy and production release requirements. Parts are implemented in the Rust alpha; this document is not a claim that every requirement below is complete. The [architecture](ARCHITECTURE.md), [API](API.md), and [security boundaries](SECURITY.md) describe current behavior. This document refines [the implementation plan](IMPLEMENTATION_PLAN.md).
+Status: target policy and production release requirements. Parts are implemented in the Rust 0.2.0 beta foundation; this document is not a claim that every requirement below is complete. The [architecture](ARCHITECTURE.md), [API](API.md), and [security boundaries](SECURITY.md) describe current behavior. This document refines [the implementation plan](IMPLEMENTATION_PLAN.md).
 
-Current gaps include ownership transfer, nested or delegated ownership policy, multi-workspace offboarding workflows, run credentials, proposal/review and export paths, administrative hard deletion, audit-reader controls, denial auditing, and complete policy-matrix tests. Direct owner disablement now cascades to owned agents, and workspace removal revokes the affected principal's workspace grants. The current handoff API reports omitted-reference counts, while section 5 proposes a stricter boolean-only indicator. Current handoff cursors encode `(created_at,id)` and reauthorize each page; they are not signed or bound to filters. These target changes require implementation and tests before they can be claimed as guarantees.
+Current gaps include ownership transfer, nested or delegated ownership policy, multi-workspace offboarding workflows, run credentials, proposal/review and export paths, administrative hard deletion, separately scoped audit-reader roles, complete denial coverage, and complete policy-matrix tests. Direct owner disablement now cascades to owned agents, workspace removal revokes the affected principal's workspace grants, and authenticated handler failures are audited on a best-effort basis. Initial tenant row quotas, per-credential request windows, tenant-admin query routes, and a verifiable audit hash chain are implemented; byte/concurrency limits, immutable external audit collection, and measured capacity are not. The current handoff API reports omitted-reference counts, while section 5 proposes a stricter boolean-only indicator. Memory, handoff, and administrator cursors use stable ordering and reauthorize each page; cursor values are not signed or bound to filters. These target changes require implementation and tests before they can be claimed as guarantees.
 
 ## 1. Boundary and guarantees
 
@@ -45,14 +45,15 @@ Use tenant-scoped composite keys and foreign keys rather than relying on opaque 
 | --- | --- |
 | tenants | `tenant_id` primary key, status and lifecycle timestamps. |
 | principals | `(tenant_id, principal_id)` primary key; kind, status and optional owner principal with same-tenant foreign key. |
-| credentials | Credential ID, globally unique token verifier, tenant and principal composite foreign key; status, expiry and revocation. Authentication lookup is a separate controlled path. |
+| credentials | Credential ID, globally unique token verifier, tenant and principal composite foreign key; status, expiry, revocation and last-use metadata. Authentication lookup is a separate controlled path. |
 | workspaces/projects | `(tenant_id, workspace_id)` and `(tenant_id, workspace_id, project_id)` keys; project foreign key to workspace. |
 | memberships | Tenant, workspace/project and principal composite foreign keys; role and status; uniqueness for active assignments. |
 | grants | Tenant, subject, issuer, workspace, target type/ID, actions, expiry and revocation; validate target's tenant and scope. Prefer typed target relations/foreign keys over unchecked polymorphic IDs. |
 | memories | `(tenant_id, memory_id)` primary key, workspace, optional project, scope, owner, creator, type, content, version, expiry and deletion state; same-tenant composite foreign keys and scope/owner consistency checks. |
 | memory_versions, proposals, handoff_references | Tenant and parent ID with composite foreign keys; references must remain in the same tenant and workspace unless policy explicitly permits otherwise. Historical content inherits the parent resource's access rules. |
 | idempotency | Unique `(tenant_id, principal_id, operation, key)` plus canonical input hash, result identifier and expiry; no response content. |
-| audit_events | Tenant, actor, action, outcome, request ID, target identifier and time; no payload or credential. Restrict audit readership separately. |
+| tenant_limits, credential_request_counters | Per-tenant row/request limits and per-credential fixed-minute counts. These are initial controls, not complete storage, cost or concurrency isolation. |
+| audit_events, audit_chain_heads | Tenant, actor, credential, action, outcome, request ID, target identifier, time and per-tenant hash linkage; no payload or token. Restrict audit readership separately. The hash chain is tamper evident but not resistant to a database owner that can rewrite events and the chain head. |
 | runs and outbox | Tenant and parent composite foreign keys; jobs contain identifiers rather than unrestricted content. Outbox is introduced with asynchronous indexing. |
 
 Use uniqueness, checks and foreign keys for tenant consistency and valid states. Explicitly model shared versus private ownership rather than making a single user owner stand for a workspace. Database constraints can reveal existence through errors; API responses normalize such failures and never return raw SQL errors. Use indexes beginning with tenant and access/filter fields for hot queries. Define page cursors with stable `(updated_at, id)` ordering and bind signed or opaque cursor state to tenant, principal, filters and expiry; verify authorization on every page.
@@ -91,7 +92,7 @@ For a handoff, reject creation when any reference is inaccessible; at read/expor
 
 ## 7. Operations, retention and incident handling
 
-Use TLS at ingress and authenticated, encrypted database connections where traffic crosses a trust boundary. Run non-root containers with isolated secrets and least-privilege network access. Configure per-tenant request, storage, concurrency and job quotas; apply bounded request sizes and timeouts. Tenant suspension disables authentication and jobs, and does not by itself erase data. Default metrics must not include content, credentials or high-cardinality tenant IDs as labels; controlled audit logs may contain tenant and actor IDs with documented retention.
+Use TLS at ingress and authenticated, encrypted database connections where traffic crosses a trust boundary. Run non-root containers with isolated secrets and least-privilege network access. The beta implements principal, active-memory, active-handoff and per-credential request limits; future controls must add bytes, database cost, concurrency and jobs, plus bounded request sizes and timeouts. Tenant suspension disables authentication and jobs, and does not by itself erase data. Default metrics must not include content, credentials or high-cardinality tenant IDs as labels; the current public metrics are process-local aggregate counters and reset on restart. Controlled audit logs may contain tenant and actor IDs with documented retention.
 
 Define backup encryption, access, rotation, retention, restore testing and legal-hold behavior per deployment. Hard deletion removes authorized content and historical/derived copies from live storage; append a minimal deletion tombstone without content so recovery can replay deletion after restoring a backup. Tombstones themselves need retention and access controls. Report backup expiry separately from live deletion. An immutable external audit sink, if used, has its own policy and evidence; application insert-only behavior alone is not tamper proof.
 
@@ -106,7 +107,7 @@ Incident runbooks cover disabling a tenant or credential, isolating a deployment
 | 3 | Schema, roles, RLS and migrations | 1–2 | Catalog audit, composite constraints, tenant-context and migration tests. |
 | 4 | Provisioning and credential lifecycle | 3 | Secure bootstrap, credential lookup, revoke/expiry/disable tests. |
 | 5 | Policy and data operations | 3–4 | Matrix tests for every operation, concurrency and cross-tenant attempts. |
-| 6 | Handoffs, SDK and deployable alpha | 5 | Two-tenant journey, references, retry and clean-install tests. |
+| 6 | Handoffs, Rust client and deployable beta foundation | 5 | Two-tenant journey, references, retry, native three-process and clean-install tests. |
 | 7 | Operations and review | 6 | Backup/restore, deletion replay, load and independent security review. |
 | 8 | Optional retrieval and adapters | 5–7 as applicable | Index propagation and real-client conformance evidence; no authorization bypass. |
 
@@ -126,7 +127,7 @@ Each work item has an owner, prerequisites, migration impact, test evidence and 
 | Lifecycle | User/agent disablement, membership removal, tenant suspension, scratch expiry, retention, hard deletion, backup restore and deletion replay. |
 | Migration | Empty install, mapped prototype data, ambiguous/orphaned rows fail closed, RLS enabled after cutover, recovery before and after writes. |
 | Derived systems | Stale index, asynchronous retry, deletion/revocation propagation and authorized recheck before content return. |
-| Observability | Audit actor/tenant/outcome accuracy, denied requests, log redaction, and audit reader authorization. |
+| Observability | Audit actor/tenant/outcome accuracy, hash-chain verification, denied requests, log redaction, metrics exposure, and audit reader authorization. |
 
 Every API route and database relation must be mapped to at least one test in a maintained coverage inventory. CI reports executed, passed, failed and skipped counts; required security tests cannot be skipped. Use real PostgreSQL and runtime roles for integration tests, not mocks alone. Test fixtures contain no production secrets.
 
@@ -144,4 +145,4 @@ Before implementation approval, document tenant-specific role customization, max
 - [ ] Independent security review is complete, findings are triaged and blocking findings remediated; release owner approves residual risk.
 - [ ] API, operational documentation and release notes state guarantees, in-flight revocation behavior, limitations and supported versions.
 
-These are acceptance criteria for implementation and operations, not claims that the current prototype meets them.
+These are acceptance criteria for implementation and operations, not claims that the current beta meets them.

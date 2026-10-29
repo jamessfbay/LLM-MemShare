@@ -1,6 +1,6 @@
 # Agent and model integrations
 
-MemShare exchanges authorized memories and typed tasks between external agent runtimes. It accepts native JSON, OpenAI-style `function_call` items, and Anthropic-style `tool_use` blocks. Both envelope mappings support create, claim, and complete. Model inference, provider credentials, and tool-loop execution belong to the orchestrator.
+MemShare exchanges authorized memories and typed tasks between external agent runtimes. It accepts native JSON, OpenAI-style `function_call` items, Anthropic-style `tool_use` blocks, a limited MCP 2025-06-18 tool surface, and a limited A2A 0.2.6 message/task surface. The crate also exports an asynchronous Rust client. Model inference, provider credentials, and tool-loop execution belong to the orchestrator.
 
 ## Integration responsibilities
 
@@ -113,6 +113,69 @@ The final read has `status: "completed"`, the result summary, and authenticated 
 
 All operations above use POST. Native calls send the inner request object directly. OpenAI-style envelopes place the serialized request in `arguments`; Anthropic-style envelopes place the object in `input`. Native read, list, release, and cancel routes work with either integration.
 
+## Rust client
+
+`MemShareClient` uses Reqwest with Rustls and returns typed `ClientError::Transport` or `ClientError::Api { status, code, message }` errors. It covers memory create/list/get/update/delete, native handoff create/list/get/claim/complete/release/cancel, and OpenAI-style or Anthropic-style handoff creation.
+
+```rust
+use llm_memshare::{model::CreateMemoryRequest, MemShareClient};
+use serde_json::json;
+use uuid::Uuid;
+
+let client = MemShareClient::new("http://127.0.0.1:8080", token)?;
+let memory = client
+    .create_memory(
+        "rust-client-example",
+        &CreateMemoryRequest {
+            workspace_id: Uuid::parse_str(workspace_id)?,
+            project_id: None,
+            scope: "private".to_owned(),
+            scope_id: Uuid::parse_str(principal_id)?,
+            kind: "fact".to_owned(),
+            content: "The deployment window starts at 02:00 UTC.".to_owned(),
+            source: json!({"client": "rust"}),
+            expires_at: None,
+        },
+    )
+    .await?;
+```
+
+Callers can provide a configured `reqwest::Client` through `with_http_client`. The client does not currently wrap tenant administration, memory history, MCP, or A2A routes, and it does not add automatic retries. Applications must retain creation keys and mutation versions explicitly.
+
+## MCP 2025-06-18 subset
+
+The authenticated JSON-RPC endpoint is `POST /v1/mcp`. It implements `initialize`, `ping`, `tools/list`, and `tools/call` for `memshare_create_handoff`, `memshare_claim_handoff`, and `memshare_complete_handoff`.
+
+```sh
+curl --fail-with-body "$MEMSHARE_URL/v1/mcp" \
+  -H "Authorization: Bearer $agent_a_token" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"example","version":"1"}}}'
+
+curl --fail-with-body "$MEMSHARE_URL/v1/mcp" \
+  -H "Authorization: Bearer $agent_a_token" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+```
+
+`tools/call` takes `params.name` and `params.arguments`. Create arguments match the native create request. Claim and complete arguments add `handoff_id` because MCP has no HTTP path parameter. Create derives its idempotency key from `X-Request-ID`; repeat that header when retrying the same call. Requests without a JSON-RPC `id` are treated as notifications and return HTTP 204. No MCP session transport, resources, prompts, sampling, cancellation, or full conformance suite is implemented.
+
+## A2A 0.2.6 subset
+
+The public Agent Card is `GET /.well-known/agent-card.json`; authenticated JSON-RPC requests go to `POST /v1/a2a`. `message/send` creates a handoff from one MemShare data part, and `tasks/get` returns a handoff as an A2A task.
+
+```sh
+a2a_request=$(jq -cn --arg ws "$MEMSHARE_WORKSPACE_ID" --arg target "$agent_b_id" \
+  '{jsonrpc:"2.0",id:1,method:"message/send",params:{message:{parts:[{kind:"data",data:{operation:"create_handoff",idempotency_key:"a2a-example-1",request:{workspace_id:$ws,target_agent_id:$target,task:{protocol_version:"1.0",summary:"Review the deployment plan",instructions:null,data:{}},input_memory_ids:[],source:{provider:"a2a-client",model:"external",framework:"example"},expires_at:null}}}]}}}')
+
+curl --fail-with-body "$MEMSHARE_URL/v1/a2a" \
+  -H "Authorization: Bearer $agent_a_token" \
+  -H 'Content-Type: application/json' \
+  -d "$a2a_request"
+```
+
+Queued, claimed, completed, and cancelled handoffs map to submitted, working, completed, and canceled A2A task states. A completed handoff result becomes a data artifact. Native routes still perform claim, release, completion, and cancellation. Streaming, push notifications, subscriptions, A2A cancellation, and full conformance are not implemented. The Agent Card advertises the configured `MEMSHARE_PUBLIC_BASE_URL`; request host and forwarded headers are not trusted.
+
 ## References, retries, and recovery
 
 Memory IDs in `input_memory_ids` or `result_memory_ids` must be readable by the submitting agent. The server reauthorizes those IDs on every read and omits inaccessible IDs with omission counts. A handoff grant does not grant memory read/write access; issue those grants separately.
@@ -123,6 +186,6 @@ The source may cancel a queued or claimed task. Cancellation changes the stored 
 
 ## Compatibility and evidence
 
-These are narrow model-output envelope mappings. They are not provider clients, full provider API compatibility layers, MCP/A2A implementations, or mechanisms for transferring private reasoning or provider sessions. Any runtime capable of HTTP can use the native contract. Model-provider SDKs and a published MemShare SDK remain future work.
+The provider mappings and protocol routes are narrow adapters over the same native handoff use cases. They are not hosted provider clients, full provider API compatibility layers, complete MCP/A2A servers, or mechanisms for transferring private reasoning or provider sessions. Any runtime capable of HTTP can use the native contract. The Rust client ships in the crate; other language SDKs remain future work.
 
-[The integration test](../tests/multi_tenant.rs) uses the real router, PostgreSQL, runtime RLS role, directional grants, and deterministic provider envelopes. It verifies task creation, target discovery, claim/release, completion, cancellation, hidden references, and tenant/participant denial. Live model quality and provider availability are outside that test's scope.
+[The main integration test](../tests/multi_tenant.rs) uses the real router, PostgreSQL, runtime RLS role, directional grants, and deterministic provider envelopes. Protocol parser/tool fixtures are unit-tested, and the [native multi-process verifier](../scripts/verify-multi-process.sh) checks MCP initialization and A2A Agent Card discovery across three API processes. This is implementation evidence for the documented subsets, not an external conformance certification. Live model quality and provider availability are outside these tests' scope.

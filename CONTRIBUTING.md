@@ -1,6 +1,8 @@
 # Contributing
 
-LLM-MemShare is an early security-sensitive Rust project. Start with a focused issue or proposal before changing identity, authorization, tenancy, migrations, retention, or compatibility behavior.
+LLM-MemShare is a security-sensitive Rust beta. Start with a focused issue or proposal before changing identity, authorization, tenancy, migrations, retention, operational limits, or compatibility behavior.
+
+Participation is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), and maintenance decisions follow [GOVERNANCE.md](GOVERNANCE.md).
 
 ## Development
 
@@ -17,7 +19,7 @@ MEMSHARE_TEST_DATABASE_URL='postgresql://admin:password@127.0.0.1:55432/memshare
   cargo test --all-targets --all-features
 ```
 
-The test database must be isolated and the supplied role must be allowed to create and drop temporary databases and roles. Never use a production URL. Documentation and examples must describe only behavior that is implemented and tested.
+The test database must be isolated and the supplied role must be allowed to create and drop temporary databases and roles. Never use a production URL. With `cargo`, `curl`, `jq`, and `psql` installed, the same URL can drive `bash scripts/verify-multi-process.sh` for a native three-process check. Documentation and examples must describe only behavior that is implemented and tested.
 
 ## Change requirements
 
@@ -25,6 +27,8 @@ The test database must be isolated and the supplied role must be allowed to crea
 - Add positive and negative tests for every authorization change. Tenant-facing database relations require composite tenant constraints, RLS policies, and non-owner tests.
 - Released migrations are immutable. Add a new numbered migration for schema or data changes, and cover both clean installation and upgrades from supported versions.
 - API changes must update `docs/API.md`, implementation status, migration/rollback notes, and the changelog.
+- Protocol changes must identify the exact MCP or A2A version and distinguish the implemented method subset from conformance. Client changes require typed error and transport tests.
+- CI and release changes must keep third-party actions pinned, preserve coverage and dependency-audit gates, and document artifact, checksum, SBOM, and provenance behavior.
 - Do not log credentials, memory content, or production data in tests and examples.
 - Keep commits focused and use Conventional Commits.
 

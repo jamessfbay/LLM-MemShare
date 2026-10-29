@@ -60,7 +60,7 @@ Grant runtime access as the owner. Existing objects need explicit grants, and de
 psql "$MEMSHARE_OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
 GRANT USAGE ON SCHEMA memshare TO memshare_runtime;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA memshare TO memshare_runtime;
-GRANT EXECUTE ON FUNCTION memshare.authenticate_credential(text) TO memshare_runtime;
+GRANT EXECUTE ON FUNCTION memshare.authenticate_request(text) TO memshare_runtime;
 ALTER DEFAULT PRIVILEGES IN SCHEMA memshare
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO memshare_runtime;
 ALTER DEFAULT PRIVILEGES IN SCHEMA memshare
@@ -125,7 +125,35 @@ curl --fail-with-body "$MEMSHARE_URL/v1/memories?q=deployment&limit=10" \
   -H "Authorization: Bearer $MEMSHARE_TOKEN"
 ```
 
-The create response has a server-generated `id` and `version: 1`. Repeating the same body and idempotency key returns the existing authorized result. A changed body under the same live key returns 409.
+The create response has a server-generated `id` and `version: 1`. The list response is `{"items":[...],"next_cursor":null}`; pass a non-null cursor back unchanged to continue in descending update order. Repeating the same body and idempotency key returns the existing authorized result. A changed body under the same live key returns 409.
+
+## 6. Inspect operational state
+
+The bootstrap user is a tenant administrator. It can read the default limits and cursor-paginated tenant metadata:
+
+```sh
+curl --fail-with-body "$MEMSHARE_URL/v1/tenant/limits" \
+  -H "Authorization: Bearer $MEMSHARE_TOKEN"
+
+curl --fail-with-body "$MEMSHARE_URL/v1/admin/principals?limit=10" \
+  -H "Authorization: Bearer $MEMSHARE_TOKEN"
+
+curl --fail-with-body "$MEMSHARE_URL/metrics"
+curl --fail-with-body "$MEMSHARE_URL/.well-known/agent-card.json"
+```
+
+New tenants default to 1,000 principals, 100,000 non-deleted memories, 100,000 queued or claimed handoffs, and 6,000 requests per credential per database-clock minute. See [operations](OPERATIONS.md) before changing them. `/metrics` and the Agent Card are public endpoints; protect or filter them at ingress if your deployment policy requires it.
+
+## 7. Run three native API processes
+
+The non-Docker verifier needs `cargo`, `curl`, `jq`, `psql`, and a disposable PostgreSQL administrator URL. It builds the debug binary, creates a temporary database and runtime role, starts three listeners, runs cross-process checks, then removes its processes and database objects:
+
+```sh
+MEMSHARE_TEST_DATABASE_URL='postgresql://TEST_ADMIN:TEST_PASSWORD@127.0.0.1:5432/postgres' \
+  bash scripts/verify-multi-process.sh
+```
+
+Do not point this script at production. It writes a local JSON report under `.gstack/qa-reports/`.
 
 ## Next steps
 
@@ -137,8 +165,10 @@ Follow [integrations](INTEGRATIONS.md) to create two agents, grant directional d
 | --- | --- |
 | `MEMSHARE_DATABASE_URL is required` | Export it or assign it before the command; shell convenience URLs are not read automatically. |
 | `unsafe runtime database role` | Use the separate runtime URL for `serve`; inspect ownership and role attributes. |
-| Authentication function permission error | Apply the runtime function grant after migration. |
+| Authentication function permission error | Grant runtime execution on `memshare.authenticate_request(text)` after migration. |
 | Connection refused | Confirm PostgreSQL or the HTTP process is listening at the selected host/port. |
 | 401 | Check bearer format, token expiry/revocation, principal status, and tenant status. |
+| 429 `rate_limited` | Wait for the database-minute window to reset or have a tenant administrator inspect `requests_per_minute`. |
+| 429 `quota_exceeded` | Inspect tenant limits and current principal, non-deleted memory, or active handoff counts. |
 | 404 for a known UUID | Check tenant, participant, grant, membership, logical deletion, and expiry; hidden resources deliberately return 404. |
 | `already_initialized` | Use `provision-tenant` for additional tenants. |

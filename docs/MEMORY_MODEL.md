@@ -15,6 +15,8 @@ The creator and owner are distinct. Client-provided `source` is stored under a c
 
 Updates require the current version. The service locks the authorized row, records the previous content in `memory_versions`, and increments the version atomically. Deletes use the same mechanism and set `deleted_at`; they are not hard deletion. Expired and logically deleted records are omitted from normal reads.
 
+Memory lists return `items` plus `next_cursor`, ordered by descending `(updated_at,id)`. Cursors are opaque encodings of that position, are not signed, and must be passed back unchanged. `GET /v1/memories/{id}/versions` returns stored prior content snapshots in descending version order with an integer version cursor. It first reauthorizes the current live memory, so logical deletion, expiry, membership removal, or grant revocation also hides its history through the API.
+
 Creation requires an idempotency key scoped to tenant, principal, and operation. The service stores only a canonical input hash, result UUID, and expiry. A replay is reauthorized, so a revoked principal cannot retrieve an earlier response through idempotency state.
 
-Context bundles, proposals, scratch/run scope, promotion, hard deletion, retention enforcement, and derived vector representations are not implemented in the Rust alpha. Directed handoffs are implemented as separate versioned records whose memory references are reauthorized when read.
+Context bundles, proposals, scratch/run scope, promotion, hard deletion, retention enforcement, and derived vector representations are not implemented in the Rust beta. Directed handoffs are implemented as separate versioned records whose memory references are reauthorized when read.

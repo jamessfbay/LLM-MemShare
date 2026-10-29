@@ -4,6 +4,33 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## Unreleased
 
+## [0.2.0] - 2026-10-29
+
+### Added
+
+- Tenant administrators can inspect cursor-paginated principals, workspaces, grants, credentials, and hash-chained audit events, including credential last-use and denied-request metadata, and verify the current tenant audit chain.
+- Deployments can set tenant principal, active-memory, active-handoff, and per-credential request limits; requests that pass authentication expose current request-limit headers, while limit failures return stable 429 errors.
+- Memory lists now use stable cursors, and authorized readers can inspect paginated prior memory versions.
+- Rust applications can use the in-crate asynchronous `MemShareClient` for memory and handoff flows with typed transport and API errors.
+- Authenticated MCP 2025-06-18 `initialize`, `ping`, `tools/list`, and handoff `tools/call` methods, plus an A2A 0.2.6 Agent Card and `message/send`/`tasks/get` subset.
+- A non-Docker three-process verifier exercises shared-database retries, reads, tenant isolation, a cross-process handoff lifecycle, protocol discovery, audit verification, admin queries, and metrics.
+- Public process-local metrics report request classes, authentication failures, and request-limit rejections without tenant labels.
+
+### Security
+
+- Request authentication now updates credential last-use, enforces an atomic database-clock request window, and records authenticated denied or failed requests on a best-effort basis.
+- Audit inserts serialize on a per-tenant chain head and hash event metadata so administrators can detect ordinary row modification or chain breaks; this is not an external immutable audit sink.
+- Audit events receive a per-tenant chain position under the head lock, so verification remains deterministic when transaction timestamps and commit order differ.
+- Lifecycle and grant operations use sorted principal locking; the PostgreSQL suite now checks opposing grants, lifecycle races, database-clock leases, credential revocation, and transaction-local pool reuse.
+- CI pins third-party actions, enforces an initial line-coverage floor, runs dependency audits, and uploads coverage output; tagged releases rerun the full PostgreSQL suite before publishing, and weekly dependency updates cover Cargo and GitHub Actions.
+- Tagged releases verify the Cargo version and publish checksummed Linux x86-64 and Apple Silicon archives with a CycloneDX SBOM and build-provenance attestations.
+
+### Known limitations
+
+- The beta has no independent production tenant-isolation certification, backup/restore proof, hard deletion, proposal workflow, or measured capacity envelope.
+- MCP and A2A support is limited to the documented method subsets. MemShare does not host model inference, transfer provider sessions, or claim full protocol conformance.
+- Metrics are process-local, request limiting uses fixed database-minute windows, and the Rust client does not yet cover administration, history, MCP, or A2A routes.
+
 ## [0.1.1] - 2026-10-28
 
 ### Fixed
